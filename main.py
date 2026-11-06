@@ -1,53 +1,39 @@
 import os
+import threading
+from http.server import BaseHTTPRequestHandler, HTTPServer
+
 import discord
 from discord import app_commands
 from discord.ext import commands
 
-# インテント設定（警告を消し、メンバー情報を取得するため）
+# ---------------------------------------------------------
+# 1. Dummy HTTP Server (For Render Web Service Port Check)
+# ---------------------------------------------------------
+class HealthCheckHandler(BaseHTTPRequestHandler):
+    def do_GET(self):
+        self.send_response(200)
+        self.end_headers()
+        self.wfile.write(b"OK")
+
+    def log_message(self, format, *args):
+        pass  # Suppress logs
+
+def run_dummy_server():
+    port = int(os.environ.get("PORT", 10000))
+    server = HTTPServer(("0.0.0.0", port), HealthCheckHandler)
+    server.serve_forever()
+
+# ---------------------------------------------------------
+# 2. Bot Setup & Intents
+# ---------------------------------------------------------
 intents = discord.Intents.default()
-intents.message_content = True
-intents.members = True 
+intents.message_content = True  # Requires Portal ON
+intents.members = True          # Requires Portal ON
 
 bot = commands.Bot(command_prefix="!", intents=intents)
 
 # ---------------------------------------------------------
-# UI: Panel View (Buttons for the Access Panel)
-# ---------------------------------------------------------
-class PanelView(discord.ui.View):
-    def __init__(self):
-        super().__init__(timeout=None)  # Persistent buttons
-
-    @discord.ui.button(label="Redeem Key", style=discord.ButtonStyle.success, emoji="🔑", custom_id="btn_redeem")
-    async def redeem_key(self, interaction: discord.Interaction, button: discord.ui.Button):
-        await interaction.response.send_modal(RedeemModal())
-
-    @discord.ui.button(label="Get Role", style=discord.ButtonStyle.primary, emoji="👤", custom_id="btn_role")
-    async def get_role(self, interaction: discord.Interaction, button: discord.ui.Button):
-        # 特定のロールを付与する例 (ロール名が "Verified" の場合)
-        role_name = "Verified"
-        role = discord.utils.get(interaction.guild.roles, name=role_name)
-        if role:
-            try:
-                await interaction.user.add_roles(role)
-                await interaction.response.send_message(f"Successfully gave you the {role_name} role!", ephemeral=True)
-            except discord.Forbidden:
-                await interaction.response.send_message("I don't have permission to give you this role.", ephemeral=True)
-        else:
-            await interaction.response.send_message(f"Role '{role_name}' not found.", ephemeral=True)
-
-    @discord.ui.button(label="Link User", style=discord.ButtonStyle.secondary, emoji="🔗", custom_id="btn_link")
-    async def link_user(self, interaction: discord.Interaction, button: discord.ui.Button):
-        await interaction.response.send_modal(LinkUserModal())
-
-    @discord.ui.button(label="Stats", style=discord.ButtonStyle.primary, emoji="📊", custom_id="btn_stats")
-    async def stats(self, interaction: discord.Interaction, button: discord.ui.Button):
-        # サーバー統計を表示する例
-        embed = discord.Embed(title="Server Stats", color=discord.Color.green())
-        embed.add_field(name="Total Members", value=str(interaction.guild.member_count))
-        await interaction.response.send_message(embed=embed, ephemeral=True)
-
-# ---------------------------------------------------------
-# UI: Modals (Pop-up forms)
+# 3. UI: Modals (Pop-up Forms)
 # ---------------------------------------------------------
 class RedeemModal(discord.ui.Modal, title="Redeem Key"):
     key_input = discord.ui.TextInput(
@@ -58,8 +44,11 @@ class RedeemModal(discord.ui.Modal, title="Redeem Key"):
     )
 
     async def on_submit(self, interaction: discord.Interaction):
-        # ここで実際のキー検証ロジック（DBチェックなど）を入れる
-        await interaction.response.send_message(f"Key `{self.key_input.value}` has been submitted. Verifying...", ephemeral=True)
+        # Add your key validation logic here
+        await interaction.response.send_message(
+            f"Key `{self.key_input.value}` has been submitted. Verifying...", 
+            ephemeral=True
+        )
 
 class LinkUserModal(discord.ui.Modal, title="Link User"):
     username_input = discord.ui.TextInput(
@@ -70,21 +59,66 @@ class LinkUserModal(discord.ui.Modal, title="Link User"):
     )
 
     async def on_submit(self, interaction: discord.Interaction):
-        await interaction.response.send_message(f"User `{self.username_input.value}` has been successfully linked.", ephemeral=True)
+        # Add your account link logic here
+        await interaction.response.send_message(
+            f"User `{self.username_input.value}` has been successfully linked.", 
+            ephemeral=True
+        )
 
 # ---------------------------------------------------------
-# Commands
+# 4. UI: Panel View (Interactive Buttons)
+# ---------------------------------------------------------
+class PanelView(discord.ui.View):
+    def __init__(self):
+        super().__init__(timeout=None)  # Persistent
+
+    @discord.ui.button(label="Redeem Key", style=discord.ButtonStyle.success, emoji="🔑", custom_id="btn_redeem")
+    async def redeem_key(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await interaction.response.send_modal(RedeemModal())
+
+    @discord.ui.button(label="Get Role", style=discord.ButtonStyle.primary, emoji="👤", custom_id="btn_role")
+    async def get_role(self, interaction: discord.Interaction, button: discord.ui.Button):
+        role_name = "Verified"  # Change this to your actual role name
+        role = discord.utils.get(interaction.guild.roles, name=role_name)
+        
+        if role:
+            try:
+                await interaction.user.add_roles(role)
+                await interaction.response.send_message(
+                    f"Successfully gave you the {role_name} role!", ephemeral=True
+                )
+            except discord.Forbidden:
+                await interaction.response.send_message(
+                    "I don't have permission to give you this role. (Check role hierarchy)", ephemeral=True
+                )
+        else:
+            await interaction.response.send_message(f"Role '{role_name}' not found.", ephemeral=True)
+
+    @discord.ui.button(label="Link User", style=discord.ButtonStyle.secondary, emoji="🔗", custom_id="btn_link")
+    async def link_user(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await interaction.response.send_modal(LinkUserModal())
+
+    @discord.ui.button(label="Stats", style=discord.ButtonStyle.primary, emoji="📊", custom_id="btn_stats")
+    async def stats(self, interaction: discord.Interaction, button: discord.ui.Button):
+        embed = discord.Embed(title="Server Stats", color=discord.Color.green())
+        embed.add_field(name="Total Members", value=str(interaction.guild.member_count))
+        await interaction.response.send_message(embed=embed, ephemeral=True)
+
+# ---------------------------------------------------------
+# 5. Bot Events & Commands
 # ---------------------------------------------------------
 @bot.event
 async def on_ready():
-    # Add persistent view so buttons work after restart
+    # Re-register persistent views
     bot.add_view(PanelView())
     
+    # Sync slash commands
     try:
         synced = await bot.tree.sync()
         print(f"Synced {len(synced)} slash command(s)")
     except Exception as e:
         print(f"Sync error: {e}")
+        
     print(f"Logged in as {bot.user}")
 
 # /panel - Posts the Access Panel
@@ -141,6 +175,11 @@ async def embed_cmd(interaction: discord.Interaction, title: str, text: str):
     embed = discord.Embed(title=title, description=text, color=discord.Color.blue())
     await interaction.response.send_message(embed=embed)
 
-# 起動
+# ---------------------------------------------------------
+# 6. Start Services
+# ---------------------------------------------------------
 if __name__ == "__main__":
+    # Start dummy server thread for Render
+    threading.Thread(target=run_dummy_server, daemon=True).start()
+    # Start Discord bot
     bot.run(os.environ["DISCORD_TOKEN"])
