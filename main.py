@@ -54,10 +54,10 @@ class RedeemModal(discord.ui.Modal, title="Redeem Key"):
     )
 
     async def on_submit(self, interaction: discord.Interaction):
-        key = self.key_input.value.upper()
+        key = self.key_input.value # Keep case-sensitive
         
         if key not in keys_db:
-            await interaction.response.send_message("❌ Invalid key.", ephemeral=True)
+            await interaction.response.send_message("❌ Invalid key. Please check for typos.", ephemeral=True)
             return
             
         key_data = keys_db[key]
@@ -65,7 +65,6 @@ class RedeemModal(discord.ui.Modal, title="Redeem Key"):
             await interaction.response.send_message("❌ This key has already been used.", ephemeral=True)
             return
             
-        # Expiration check (None means Lifetime)
         if key_data["expires_at"] is not None:
             if datetime.now(timezone.utc) > key_data["expires_at"]:
                 await interaction.response.send_message("❌ This key has expired.", ephemeral=True)
@@ -73,7 +72,7 @@ class RedeemModal(discord.ui.Modal, title="Redeem Key"):
 
         keys_db[key]["used_by"] = interaction.user.id
         await interaction.response.send_message(
-            f"✅ Key `{key}` successfully redeemed!\nYou can now use the 'Get Role' button.", 
+            f"✅ Key `{key}` successfully redeemed!\nYou can now click **Get Role** to verify.", 
             ephemeral=True
         )
 
@@ -94,7 +93,7 @@ class LinkUserModal(discord.ui.Modal, title="Link Roblox User"):
         )
 
 # =========================================================
-# 5. UI: Panel View
+# 5. UI: Main Panel View
 # =========================================================
 class PanelView(discord.ui.View):
     def __init__(self):
@@ -156,11 +155,71 @@ class PanelView(discord.ui.View):
         await interaction.response.send_message(embed=embed, ephemeral=True)
 
 # =========================================================
-# 6. Commands
+# 6. UI: Ticket System Views
+# =========================================================
+class TicketPanelView(discord.ui.View):
+    def __init__(self):
+        super().__init__(timeout=None)
+
+    @discord.ui.button(label="Create Ticket", style=discord.ButtonStyle.success, emoji="🎫", custom_id="btn_create_ticket")
+    async def create_ticket(self, interaction: discord.Interaction, button: discord.ui.Button):
+        guild = interaction.guild
+        # Get the owner role (Change "Support Team" to your actual role name)
+        owner_role = discord.utils.get(guild.roles, name="Support Team")
+        
+        # Check if user already has an open ticket
+        existing_channel = discord.utils.get(guild.channels, name=f"ticket-{interaction.user.name.lower()}")
+        if existing_channel:
+            await interaction.response.send_message(f"❌ You already have an open ticket: {existing_channel.mention}", ephemeral=True)
+            return
+
+        # Set channel permissions
+        overwrites = {
+            guild.default_role: discord.PermissionOverwrite(read_messages=False),
+            interaction.user: discord.PermissionOverwrite(read_messages=True, send_messages=True),
+            guild.me: discord.PermissionOverwrite(read_messages=True, send_messages=True)
+        }
+        if owner_role:
+            overwrites[owner_role] = discord.PermissionOverwrite(read_messages=True, send_messages=True)
+
+        # Create channel
+        ticket_channel = await guild.create_text_channel(
+            name=f"ticket-{interaction.user.name}",
+            overwrites=overwrites,
+            category=interaction.channel.category 
+        )
+        
+        # Mention owner role in the ticket
+        mention_text = owner_role.mention if owner_role else "Support Team"
+        
+        embed = discord.Embed(
+            title="Ticket Created",
+            description=f"Hello {interaction.user.mention},\nThank you for reaching out. A staff member will be with you shortly.\n\n{mention_text}, please assist this user.",
+            color=discord.Color.green()
+        )
+        
+        await ticket_channel.send(content=mention_text, embed=embed, view=TicketControlView())
+        await interaction.response.send_message(f"✅ Ticket created: {ticket_channel.mention}", ephemeral=True)
+
+class TicketControlView(discord.ui.View):
+    def __init__(self):
+        super().__init__(timeout=None)
+
+    @discord.ui.button(label="Close Ticket", style=discord.ButtonStyle.danger, emoji="🔒", custom_id="btn_close_ticket")
+    async def close_ticket(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await interaction.response.send_message("Closing ticket in 3 seconds...", ephemeral=True)
+        import asyncio
+        await asyncio.sleep(3)
+        await interaction.channel.delete()
+
+# =========================================================
+# 7. Commands
 # =========================================================
 @bot.event
 async def on_ready():
     bot.add_view(PanelView())
+    bot.add_view(TicketPanelView())
+    bot.add_view(TicketControlView())
     try:
         synced = await bot.tree.sync()
         print(f"Synced {len(synced)} slash command(s)")
@@ -168,39 +227,11 @@ async def on_ready():
         print(f"Sync error: {e}")
     print(f"Logged in as {bot.user}")
 
-@bot.tree.command(name="panel", description="Post the access panel")
-async def panel(interaction: discord.Interaction):
-    embed = discord.Embed(
-        title="Panel Access",
-        description="Purchase a valid access key to unlock the panel.\n**Flow:**\n`Buy Key ➔ Redeem Key ➔ Link Account ➔ Access Panel`",
-        color=discord.Color.blue()
-    )
-    await interaction.response.send_message(embed=embed, view=PanelView())
-
-@bot.tree.command(name="prices", description="Post the pricing information")
-async def prices(interaction: discord.Interaction):
-    embed = discord.Embed(title="💰 Prices", color=discord.Color.gold())
-    embed.add_field(name="4 day key:", value="5 Garamas or 4 US$\n\u200b", inline=False)
-    embed.add_field(name="Lifetime key:", value="1 Dragon or 10 US$\n\u200b", inline=False)
-    embed.add_field(name="Invite Rewards:", value="**5 invites** = 1 hour free key\n**10 invites** = 1 day free key", inline=False)
-    await interaction.response.send_message(embed=embed)
-
-@bot.tree.command(name="say", description="Post a message as the bot")
-@app_commands.describe(text="The message to post")
-async def say(interaction: discord.Interaction, text: str):
-    await interaction.response.send_message(text)
-
-@bot.tree.command(name="embed", description="Post a custom embed")
-@app_commands.describe(title="Embed title", text="Embed description")
-async def embed_cmd(interaction: discord.Interaction, title: str, text: str):
-    embed = discord.Embed(title=title, description=text, color=discord.Color.blue())
-    await interaction.response.send_message(embed=embed)
-
-# === NEW KEY GENERATION COMMAND ===
+# === キー生成コマンド ===
 @bot.tree.command(name="generatekey", description="[ADMIN] Generate a new 16-character access key")
 @app_commands.describe(
     duration="Select the duration for this key",
-    custom_days="(Optional) Enter custom days if 'Custom' is selected above"
+    custom_days="(Optional) Enter custom days if 'Custom' is selected"
 )
 @app_commands.choices(duration=[
     app_commands.Choice(name="1 Hour", value="1h"),
@@ -213,8 +244,8 @@ async def embed_cmd(interaction: discord.Interaction, title: str, text: str):
 ])
 @app_commands.checks.has_permissions(administrator=True)
 async def generatekey(interaction: discord.Interaction, duration: app_commands.Choice[str], custom_days: int = None):
-    # Generate 16 char key
-    chars = string.ascii_uppercase + string.digits
+    # Mixed case characters + digits (a-z, A-Z, 0-9)
+    chars = string.ascii_letters + string.digits
     new_key = ''.join(random.choices(chars, k=16))
     
     now = datetime.now(timezone.utc)
@@ -246,15 +277,14 @@ async def generatekey(interaction: discord.Interaction, duration: app_commands.C
         expires_at = now + timedelta(days=custom_days)
         duration_text = f"{custom_days} Days"
     
-    # Save to DB
     keys_db[new_key] = {
         "expires_at": expires_at,
         "used_by": None
     }
     
-    # Create response embed
+    # Use code block for easy copy-paste on mobile
     embed = discord.Embed(title="🔑 Key Generated", color=discord.Color.green())
-    embed.add_field(name="Key", value=f"```{new_key}```", inline=False)
+    embed.add_field(name="Key", value=f"```\n{new_key}\n```", inline=False)
     embed.add_field(name="Duration", value=duration_text, inline=True)
     
     if expires_at:
@@ -265,13 +295,48 @@ async def generatekey(interaction: discord.Interaction, duration: app_commands.C
     embed.set_footer(text="Only the buyer should see this. It can only be redeemed once.")
     await interaction.response.send_message(embed=embed, ephemeral=True)
 
-@generatekey.error
-async def generatekey_error(interaction: discord.Interaction, error):
-    if isinstance(error, app_commands.errors.MissingPermissions):
-        await interaction.response.send_message("❌ You do not have permission to use this command.", ephemeral=True)
+# === チケットパネル作成コマンド ===
+@bot.tree.command(name="ticket_setup", description="[ADMIN] Post the ticket panel")
+@app_commands.checks.has_permissions(administrator=True)
+async def ticket_setup(interaction: discord.Interaction):
+    embed = discord.Embed(
+        title="🎫 Support Tickets",
+        description="Need help? Click the button below to open a private ticket with our support team.",
+        color=discord.Color.blurple()
+    )
+    await interaction.response.send_message(embed=embed, view=TicketPanelView())
+
+# === その他のコマンド ===
+@bot.tree.command(name="panel", description="Post the access panel")
+async def panel(interaction: discord.Interaction):
+    embed = discord.Embed(
+        title="Panel Access",
+        description="Purchase a valid access key to unlock the panel.\n**Flow:**\n`Buy Key ➔ Redeem Key ➔ Link Account ➔ Access Panel`",
+        color=discord.Color.blue()
+    )
+    await interaction.response.send_message(embed=embed, view=PanelView())
+
+@bot.tree.command(name="prices", description="Post the pricing information")
+async def prices(interaction: discord.Interaction):
+    embed = discord.Embed(title="💰 Prices", color=discord.Color.gold())
+    embed.add_field(name="4 day key:", value="5 Garamas or 4 US$\n\u200b", inline=False)
+    embed.add_field(name="Lifetime key:", value="1 Dragon or 10 US$\n\u200b", inline=False)
+    embed.add_field(name="Invite Rewards:", value="**5 invites** = 1 hour free key\n**10 invites** = 1 day free key", inline=False)
+    await interaction.response.send_message(embed=embed)
+
+@bot.tree.command(name="say", description="Post a message as the bot")
+@app_commands.describe(text="The message to post")
+async def say(interaction: discord.Interaction, text: str):
+    await interaction.response.send_message(text)
+
+@bot.tree.command(name="embed", description="Post a custom embed")
+@app_commands.describe(title="Embed title", text="Embed description")
+async def embed_cmd(interaction: discord.Interaction, title: str, text: str):
+    embed = discord.Embed(title=title, description=text, color=discord.Color.blue())
+    await interaction.response.send_message(embed=embed)
 
 # =========================================================
-# 7. Start
+# 8. Start
 # =========================================================
 if __name__ == "__main__":
     threading.Thread(target=run_dummy_server, daemon=True).start()
