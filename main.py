@@ -4,6 +4,7 @@ import random
 import string
 from datetime import datetime, timedelta, timezone
 from http.server import BaseHTTPRequestHandler, HTTPServer
+import asyncio
 
 import discord
 from discord import app_commands
@@ -28,9 +29,8 @@ def run_dummy_server():
 # =========================================================
 # 2. In-Memory Database
 # =========================================================
-# keys_db = { "KEYCODE": {"expires_at": datetime | None, "used_by": int | None} }
 keys_db = {}
-linked_users = {} # { user_id: "roblox_username" }
+linked_users = {} 
 
 # =========================================================
 # 3. Bot Setup
@@ -54,13 +54,15 @@ class RedeemModal(discord.ui.Modal, title="Redeem Key"):
     )
 
     async def on_submit(self, interaction: discord.Interaction):
-        key = self.key_input.value # Keep case-sensitive
+        # Discordの自動大文字化仕様を回避するため、すべて大文字に変換して比較
+        key = self.key_input.value.strip().upper()
         
         if key not in keys_db:
             await interaction.response.send_message("❌ Invalid key. Please check for typos.", ephemeral=True)
             return
             
         key_data = keys_db[key]
+        
         if key_data["used_by"] is not None:
             await interaction.response.send_message("❌ This key has already been used.", ephemeral=True)
             return
@@ -72,7 +74,7 @@ class RedeemModal(discord.ui.Modal, title="Redeem Key"):
 
         keys_db[key]["used_by"] = interaction.user.id
         await interaction.response.send_message(
-            f"✅ Key `{key}` successfully redeemed!\nYou can now click **Get Role** to verify.", 
+            f"✅ Key successfully redeemed!\nYou can now click **Get Role** to verify.", 
             ephemeral=True
         )
 
@@ -164,16 +166,13 @@ class TicketPanelView(discord.ui.View):
     @discord.ui.button(label="Create Ticket", style=discord.ButtonStyle.success, emoji="🎫", custom_id="btn_create_ticket")
     async def create_ticket(self, interaction: discord.Interaction, button: discord.ui.Button):
         guild = interaction.guild
-        # Get the owner role (Change "Support Team" to your actual role name)
-        owner_role = discord.utils.get(guild.roles, name="Support Team")
+        owner_role = discord.utils.get(guild.roles, name="Support Team") # Change to your owner role
         
-        # Check if user already has an open ticket
         existing_channel = discord.utils.get(guild.channels, name=f"ticket-{interaction.user.name.lower()}")
         if existing_channel:
             await interaction.response.send_message(f"❌ You already have an open ticket: {existing_channel.mention}", ephemeral=True)
             return
 
-        # Set channel permissions
         overwrites = {
             guild.default_role: discord.PermissionOverwrite(read_messages=False),
             interaction.user: discord.PermissionOverwrite(read_messages=True, send_messages=True),
@@ -182,14 +181,12 @@ class TicketPanelView(discord.ui.View):
         if owner_role:
             overwrites[owner_role] = discord.PermissionOverwrite(read_messages=True, send_messages=True)
 
-        # Create channel
         ticket_channel = await guild.create_text_channel(
             name=f"ticket-{interaction.user.name}",
             overwrites=overwrites,
             category=interaction.channel.category 
         )
         
-        # Mention owner role in the ticket
         mention_text = owner_role.mention if owner_role else "Support Team"
         
         embed = discord.Embed(
@@ -208,7 +205,6 @@ class TicketControlView(discord.ui.View):
     @discord.ui.button(label="Close Ticket", style=discord.ButtonStyle.danger, emoji="🔒", custom_id="btn_close_ticket")
     async def close_ticket(self, interaction: discord.Interaction, button: discord.ui.Button):
         await interaction.response.send_message("Closing ticket in 3 seconds...", ephemeral=True)
-        import asyncio
         await asyncio.sleep(3)
         await interaction.channel.delete()
 
@@ -244,8 +240,8 @@ async def on_ready():
 ])
 @app_commands.checks.has_permissions(administrator=True)
 async def generatekey(interaction: discord.Interaction, duration: app_commands.Choice[str], custom_days: int = None):
-    # Mixed case characters + digits (a-z, A-Z, 0-9)
-    chars = string.ascii_letters + string.digits
+    # 大文字と数字のみで生成（Discordのモーダル仕様と完全に一致させる）
+    chars = string.ascii_uppercase + string.digits
     new_key = ''.join(random.choices(chars, k=16))
     
     now = datetime.now(timezone.utc)
@@ -282,7 +278,6 @@ async def generatekey(interaction: discord.Interaction, duration: app_commands.C
         "used_by": None
     }
     
-    # Use code block for easy copy-paste on mobile
     embed = discord.Embed(title="🔑 Key Generated", color=discord.Color.green())
     embed.add_field(name="Key", value=f"```\n{new_key}\n```", inline=False)
     embed.add_field(name="Duration", value=duration_text, inline=True)
