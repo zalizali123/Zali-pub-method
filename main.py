@@ -2,7 +2,7 @@ import os
 import threading
 import random
 import string
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from http.server import BaseHTTPRequestHandler, HTTPServer
 
 import discord
@@ -10,14 +10,13 @@ from discord import app_commands
 from discord.ext import commands
 
 # =========================================================
-# 1. Dummy HTTP Server (For Render Web Service Port)
+# 1. Dummy HTTP Server (For Render)
 # =========================================================
 class HealthCheckHandler(BaseHTTPRequestHandler):
     def do_GET(self):
         self.send_response(200)
         self.end_headers()
         self.wfile.write(b"OK")
-
     def log_message(self, format, *args):
         pass
 
@@ -27,12 +26,11 @@ def run_dummy_server():
     server.serve_forever()
 
 # =========================================================
-# 2. In-Memory Database (Replace with real DB for production)
+# 2. In-Memory Database
 # =========================================================
-# keys = { "KEYCODE": {"expires_at": datetime, "used_by": None} }
+# keys_db = { "KEYCODE": {"expires_at": datetime | None, "used_by": int | None} }
 keys_db = {}
-# linked_users = { discord_user_id: "roblox_username" }
-linked_users = {}
+linked_users = {} # { user_id: "roblox_username" }
 
 # =========================================================
 # 3. Bot Setup
@@ -40,11 +38,10 @@ linked_users = {}
 intents = discord.Intents.default()
 intents.message_content = True
 intents.members = True
-
 bot = commands.Bot(command_prefix="!", intents=intents)
 
 # =========================================================
-# 4. UI: Modals (Pop-up Forms)
+# 4. UI: Modals
 # =========================================================
 class RedeemModal(discord.ui.Modal, title="Redeem Key"):
     key_input = discord.ui.TextInput(
@@ -68,16 +65,15 @@ class RedeemModal(discord.ui.Modal, title="Redeem Key"):
             await interaction.response.send_message("❌ This key has already been used.", ephemeral=True)
             return
             
-        if datetime.utcnow() > key_data["expires_at"]:
-            await interaction.response.send_message("❌ This key has expired.", ephemeral=True)
-            return
+        # Expiration check (None means Lifetime)
+        if key_data["expires_at"] is not None:
+            if datetime.now(timezone.utc) > key_data["expires_at"]:
+                await interaction.response.send_message("❌ This key has expired.", ephemeral=True)
+                return
 
-        # Mark key as used
         keys_db[key]["used_by"] = interaction.user.id
-        
-        # Save to linked_users if they have a username, else just mark as authorized
         await interaction.response.send_message(
-            f"✅ Key `{key}` successfully redeemed!\nYou can now use the 'Get Role' button to verify.", 
+            f"✅ Key `{key}` successfully redeemed!\nYou can now use the 'Get Role' button.", 
             ephemeral=True
         )
 
@@ -93,12 +89,12 @@ class LinkUserModal(discord.ui.Modal, title="Link Roblox User"):
         roblox_name = self.username_input.value
         linked_users[interaction.user.id] = roblox_name
         await interaction.response.send_message(
-            f"✅ Successfully linked your Discord account to Roblox user: **{roblox_name}**", 
+            f"✅ Linked to Roblox user: **{roblox_name}**", 
             ephemeral=True
         )
 
 # =========================================================
-# 5. UI: Panel View (Buttons)
+# 5. UI: Panel View
 # =========================================================
 class PanelView(discord.ui.View):
     def __init__(self):
@@ -110,24 +106,23 @@ class PanelView(discord.ui.View):
 
     @discord.ui.button(label="Get Role", style=discord.ButtonStyle.primary, emoji="👤", custom_id="btn_role")
     async def get_role(self, interaction: discord.Interaction, button: discord.ui.Button):
-        # Check if user has a valid redeemed key
         user_has_key = any(data["used_by"] == interaction.user.id for data in keys_db.values())
         
         if not user_has_key:
-            await interaction.response.send_message("❌ You must redeem a valid key first before getting the role.", ephemeral=True)
+            await interaction.response.send_message("❌ You must redeem a valid key first.", ephemeral=True)
             return
             
-        role_name = "Verified"  # Change to your role name
+        role_name = "Verified" # Change to your role name
         role = discord.utils.get(interaction.guild.roles, name=role_name)
         
         if role:
             try:
                 await interaction.user.add_roles(role)
-                await interaction.response.send_message(f"✅ Successfully gave you the {role_name} role!", ephemeral=True)
+                await interaction.response.send_message(f"✅ Gave you the {role_name} role!", ephemeral=True)
             except discord.Forbidden:
                 await interaction.response.send_message("❌ I don't have permission to give you this role.", ephemeral=True)
         else:
-            await interaction.response.send_message(f"❌ Role '{role_name}' not found. Please contact staff.", ephemeral=True)
+            await interaction.response.send_message(f"❌ Role '{role_name}' not found.", ephemeral=True)
 
     @discord.ui.button(label="Link User", style=discord.ButtonStyle.secondary, emoji="🔗", custom_id="btn_link")
     async def link_user(self, interaction: discord.Interaction, button: discord.ui.Button):
@@ -135,7 +130,6 @@ class PanelView(discord.ui.View):
 
     @discord.ui.button(label="Stats", style=discord.ButtonStyle.primary, emoji="📊", custom_id="btn_stats")
     async def stats(self, interaction: discord.Interaction, button: discord.ui.Button):
-        # Find user's key info
         user_key_info = None
         for key, data in keys_db.items():
             if data["used_by"] == interaction.user.id:
@@ -149,50 +143,17 @@ class PanelView(discord.ui.View):
         
         if user_key_info:
             key_code, data = user_key_info
-            expires = data["expires_at"].strftime("%Y-%m-%d %H:%M UTC")
+            if data["expires_at"] is None:
+                expiry_text = "Lifetime (Never expires)"
+            else:
+                expiry_text = data["expires_at"].strftime("%Y-%m-%d %H:%M UTC")
+                
             embed.add_field(name="Active Key", value=f"`{key_code}`", inline=True)
-            embed.add_field(name="Expires At", value=expires, inline=True)
+            embed.add_field(name="Expires At", value=expiry_text, inline=True)
         else:
-            embed.add_field(name="Active Key", value="None (Please redeem a key)", inline=False)
+            embed.add_field(name="Active Key", value="None", inline=False)
             
         await interaction.response.send_message(embed=embed, ephemeral=True)
-
-    @discord.ui.button(label="Create Ticket", style=discord.ButtonStyle.secondary, emoji="🎫", custom_id="btn_ticket")
-    async def create_ticket(self, interaction: discord.Interaction, button: discord.ui.Button):
-        guild = interaction.guild
-        # Create a private channel
-        overwrites = {
-            guild.default_role: discord.PermissionOverwrite(read_messages=False),
-            interaction.user: discord.PermissionOverwrite(read_messages=True, send_messages=True),
-            guild.me: discord.PermissionOverwrite(read_messages=True, send_messages=True)
-        }
-        
-        # Optional: Add staff role
-        # staff_role = discord.utils.get(guild.roles, name="Staff")
-        # if staff_role: overwrites[staff_role] = discord.PermissionOverwrite(read_messages=True, send_messages=True)
-
-        ticket_channel = await guild.create_text_channel(
-            name=f"ticket-{interaction.user.name}",
-            overwrites=overwrites,
-            category=interaction.channel.category # Create in same category
-        )
-        
-        embed = discord.Embed(
-            title="Ticket Created",
-            description=f"Hello {interaction.user.mention}, staff will be with you shortly.\nTo close this ticket, click the button below.",
-            color=discord.Color.green()
-        )
-        await ticket_channel.send(embed=embed, view=TicketControlView())
-        await interaction.response.send_message(f"✅ Ticket created: {ticket_channel.mention}", ephemeral=True)
-
-class TicketControlView(discord.ui.View):
-    def __init__(self):
-        super().__init__(timeout=None)
-
-    @discord.ui.button(label="Close Ticket", style=discord.ButtonStyle.danger, emoji="🔒")
-    async def close_ticket(self, interaction: discord.Interaction, button: discord.ui.Button):
-        await interaction.response.send_message("Closing ticket...", ephemeral=True)
-        await interaction.channel.delete()
 
 # =========================================================
 # 6. Commands
@@ -200,9 +161,6 @@ class TicketControlView(discord.ui.View):
 @bot.event
 async def on_ready():
     bot.add_view(PanelView())
-    # For tickets to work persistently across restarts
-    bot.add_view(TicketControlView())
-    
     try:
         synced = await bot.tree.sync()
         print(f"Synced {len(synced)} slash command(s)")
@@ -210,22 +168,15 @@ async def on_ready():
         print(f"Sync error: {e}")
     print(f"Logged in as {bot.user}")
 
-# /panel
 @bot.tree.command(name="panel", description="Post the access panel")
 async def panel(interaction: discord.Interaction):
     embed = discord.Embed(
         title="Panel Access",
-        description=(
-            "Purchase a valid access key to unlock the panel. Once your key has been purchased, "
-            "head over to Redeem, enter your key, and link your account to get started.\n\n"
-            "**Flow:**\n"
-            "`Buy Key ➔ Redeem Key ➔ Link Account ➔ Access Panel`"
-        ),
+        description="Purchase a valid access key to unlock the panel.\n**Flow:**\n`Buy Key ➔ Redeem Key ➔ Link Account ➔ Access Panel`",
         color=discord.Color.blue()
     )
     await interaction.response.send_message(embed=embed, view=PanelView())
 
-# /prices
 @bot.tree.command(name="prices", description="Post the pricing information")
 async def prices(interaction: discord.Interaction):
     embed = discord.Embed(title="💰 Prices", color=discord.Color.gold())
@@ -234,41 +185,84 @@ async def prices(interaction: discord.Interaction):
     embed.add_field(name="Invite Rewards:", value="**5 invites** = 1 hour free key\n**10 invites** = 1 day free key", inline=False)
     await interaction.response.send_message(embed=embed)
 
-# /say
 @bot.tree.command(name="say", description="Post a message as the bot")
 @app_commands.describe(text="The message to post")
 async def say(interaction: discord.Interaction, text: str):
     await interaction.response.send_message(text)
 
-# /embed
 @bot.tree.command(name="embed", description="Post a custom embed")
 @app_commands.describe(title="Embed title", text="Embed description")
 async def embed_cmd(interaction: discord.Interaction, title: str, text: str):
     embed = discord.Embed(title=title, description=text, color=discord.Color.blue())
     await interaction.response.send_message(embed=embed)
 
-# /generatekey - Admin only
+# === NEW KEY GENERATION COMMAND ===
 @bot.tree.command(name="generatekey", description="[ADMIN] Generate a new 16-character access key")
-@app_commands.describe(days="Number of days the key is valid (e.g., 4, 30, 365)")
+@app_commands.describe(
+    duration="Select the duration for this key",
+    custom_days="(Optional) Enter custom days if 'Custom' is selected above"
+)
+@app_commands.choices(duration=[
+    app_commands.Choice(name="1 Hour", value="1h"),
+    app_commands.Choice(name="1 Day", value="1d"),
+    app_commands.Choice(name="4 Days", value="4d"),
+    app_commands.Choice(name="7 Days", value="7d"),
+    app_commands.Choice(name="30 Days", value="30d"),
+    app_commands.Choice(name="Lifetime (Permanent)", value="lifetime"),
+    app_commands.Choice(name="Custom (Use custom_days)", value="custom"),
+])
 @app_commands.checks.has_permissions(administrator=True)
-async def generatekey(interaction: discord.Interaction, days: int):
-    # Generate random 16 character string
+async def generatekey(interaction: discord.Interaction, duration: app_commands.Choice[str], custom_days: int = None):
+    # Generate 16 char key
     chars = string.ascii_uppercase + string.digits
     new_key = ''.join(random.choices(chars, k=16))
     
-    expires_at = datetime.utcnow() + timedelta(days=days)
+    now = datetime.now(timezone.utc)
+    expires_at = None
+    duration_text = ""
+
+    if duration.value == "lifetime":
+        expires_at = None
+        duration_text = "Lifetime (Permanent)"
+    elif duration.value == "1h":
+        expires_at = now + timedelta(hours=1)
+        duration_text = "1 Hour"
+    elif duration.value == "1d":
+        expires_at = now + timedelta(days=1)
+        duration_text = "1 Day"
+    elif duration.value == "4d":
+        expires_at = now + timedelta(days=4)
+        duration_text = "4 Days"
+    elif duration.value == "7d":
+        expires_at = now + timedelta(days=7)
+        duration_text = "7 Days"
+    elif duration.value == "30d":
+        expires_at = now + timedelta(days=30)
+        duration_text = "30 Days"
+    elif duration.value == "custom":
+        if not custom_days or custom_days <= 0:
+            await interaction.response.send_message("❌ Please provide a valid `custom_days` value greater than 0.", ephemeral=True)
+            return
+        expires_at = now + timedelta(days=custom_days)
+        duration_text = f"{custom_days} Days"
     
+    # Save to DB
     keys_db[new_key] = {
         "expires_at": expires_at,
         "used_by": None
     }
     
+    # Create response embed
     embed = discord.Embed(title="🔑 Key Generated", color=discord.Color.green())
-    embed.add_field(name="Key", value=f"`{new_key}`", inline=False)
-    embed.add_field(name="Valid For", value=f"{days} days", inline=True)
-    embed.add_field(name="Expires At", value=expires_at.strftime("%Y-%m-%d %H:%M UTC"), inline=True)
-    embed.set_footer(text="Give this key to the buyer. It can only be redeemed once.")
+    embed.add_field(name="Key", value=f"```{new_key}```", inline=False)
+    embed.add_field(name="Duration", value=duration_text, inline=True)
     
+    if expires_at:
+        embed.add_field(name="Expires At", value=expires_at.strftime("%Y-%m-%d %H:%M UTC"), inline=True)
+    else:
+        embed.add_field(name="Expires At", value="Never", inline=True)
+        
+    embed.set_footer(text="Only the buyer should see this. It can only be redeemed once.")
     await interaction.response.send_message(embed=embed, ephemeral=True)
 
 @generatekey.error
@@ -277,7 +271,7 @@ async def generatekey_error(interaction: discord.Interaction, error):
         await interaction.response.send_message("❌ You do not have permission to use this command.", ephemeral=True)
 
 # =========================================================
-# 7. Start Services
+# 7. Start
 # =========================================================
 if __name__ == "__main__":
     threading.Thread(target=run_dummy_server, daemon=True).start()
