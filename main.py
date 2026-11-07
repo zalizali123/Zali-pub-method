@@ -309,7 +309,7 @@ async def generatekey(interaction: discord.Interaction, duration: app_commands.C
         duration_text = "4 Days"
     
     embed = discord.Embed(title="🔑 Key Generated", color=discord.Color.green())
-    embed.add_field(name="Key", value=f"```\n{key}\n```", inline=False)
+    embed.add_field(name="Key", value=f"`\n{key}\n`", inline=False)
     embed.add_field(name="Duration", value=duration_text, inline=True)
     await interaction.response.send_message(embed=embed, ephemeral=True)
 
