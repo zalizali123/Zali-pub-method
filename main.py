@@ -328,18 +328,14 @@ async def on_ready():
         print(f"Sync error: {e}")
     print(f"Logged in as {bot.user}")
 
-# === ホワイトリスト追加コマンド（期限指定可能） ===
+# === ホワイトリスト追加 ===
 @bot.tree.command(name="whitelist", description="[OWNER] Whitelist a user and give them a key with a specific duration")
-@app_commands.describe(
-    user="The user to whitelist",
-    days="Duration in days (0 or blank for Lifetime)"
-)
+@app_commands.describe(user="The user to whitelist", days="Duration in days (0 or blank for Lifetime)")
 @app_commands.checks.has_permissions(administrator=True)
 async def whitelist_cmd(interaction: discord.Interaction, user: discord.User, days: int = 0):
     whitelist.add(user.id)
     blacklist.discard(user.id)
     
-    # 期限の計算（daysが0ならLifetime）
     duration_hours = days * 24
     key = create_key(duration_hours=duration_hours if days > 0 else 0)
     
@@ -362,7 +358,19 @@ async def whitelist_cmd(interaction: discord.Interaction, user: discord.User, da
     
     await interaction.response.send_message(embed=embed, ephemeral=True)
 
-# === ブラックリスト追加コマンド ===
+# === ホワイトリスト解除 ===
+@bot.tree.command(name="unwhitelist", description="[OWNER] Remove a user from the whitelist")
+@app_commands.describe(user="The user to remove from whitelist")
+@app_commands.checks.has_permissions(administrator=True)
+async def unwhitelist_cmd(interaction: discord.Interaction, user: discord.User):
+    if user.id in whitelist:
+        whitelist.discard(user.id)
+        embed = discord.Embed(title="🗑️ User Unwhitelisted", description=f"{user.mention} has been removed from the whitelist.", color=discord.Color.orange())
+    else:
+        embed = discord.Embed(title="❌ Not Found", description=f"{user.mention} is not in the whitelist.", color=discord.Color.red())
+    await interaction.response.send_message(embed=embed, ephemeral=True)
+
+# === ブラックリスト追加 ===
 @bot.tree.command(name="blacklist", description="[OWNER] Blacklist a user from using the bot")
 @app_commands.describe(user="The user to blacklist")
 @app_commands.checks.has_permissions(administrator=True)
@@ -375,6 +383,18 @@ async def blacklist_cmd(interaction: discord.Interaction, user: discord.User):
         description=f"{user.mention} has been blacklisted. They can no longer use the panel or commands.",
         color=discord.Color.red()
     )
+    await interaction.response.send_message(embed=embed, ephemeral=True)
+
+# === ブラックリスト解除 ===
+@bot.tree.command(name="unblacklist", description="[OWNER] Remove a user from the blacklist")
+@app_commands.describe(user="The user to remove from blacklist")
+@app_commands.checks.has_permissions(administrator=True)
+async def unblacklist_cmd(interaction: discord.Interaction, user: discord.User):
+    if user.id in blacklist:
+        blacklist.discard(user.id)
+        embed = discord.Embed(title="🔓 User Unblacklisted", description=f"{user.mention} has been removed from the blacklist.", color=discord.Color.green())
+    else:
+        embed = discord.Embed(title="❌ Not Found", description=f"{user.mention} is not in the blacklist.", color=discord.Color.red())
     await interaction.response.send_message(embed=embed, ephemeral=True)
 
 @bot.tree.command(name="set_roles", description="[OWNER] Set the roles for verification and tickets")
