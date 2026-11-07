@@ -46,9 +46,10 @@ spin_config = {
     "last_spin_times": {}
 }
 
+# ロール設定（複数ロール対応のためリスト形式に変更）
 role_config = {
     "verified_role": "Verified",
-    "ticket_owner_role": "Support Team"
+    "ticket_access_roles": ["Support Team"] # デフォルトのアクセスロール
 }
 
 # =========================================================
@@ -206,29 +207,35 @@ class TicketPanelView(discord.ui.View):
             return
 
         guild = interaction.guild
-        owner_role_name = role_config["ticket_owner_role"]
-        owner_role = discord.utils.get(guild.roles, name=owner_role_name)
+        access_role_names = role_config["ticket_access_roles"]
         
         existing_channel = discord.utils.get(guild.channels, name=f"ticket-{interaction.user.name.lower()}")
         if existing_channel:
             await interaction.response.send_message(f"❌ You already have an open ticket: {existing_channel.mention}", ephemeral=True)
             return
 
+        # デフォルトの権限設定
         overwrites = {
             guild.default_role: discord.PermissionOverwrite(read_messages=False),
             interaction.user: discord.PermissionOverwrite(read_messages=True, send_messages=True),
             guild.me: discord.PermissionOverwrite(read_messages=True, send_messages=True)
         }
-        if owner_role:
-            overwrites[owner_role] = discord.PermissionOverwrite(read_messages=True, send_messages=True)
+
+        # 設定されたすべてのロールに権限を付与
+        mention_list = []
+        for r_name in access_role_names:
+            role = discord.utils.get(guild.roles, name=r_name.strip())
+            if role:
+                overwrites[role] = discord.PermissionOverwrite(read_messages=True, send_messages=True)
+                mention_list.append(role.mention)
+        
+        mention_text = ", ".join(mention_list) if mention_list else "No roles configured."
 
         ticket_channel = await guild.create_text_channel(
             name=f"ticket-{interaction.user.name}",
             overwrites=overwrites,
             category=interaction.channel.category 
         )
-        
-        mention_text = owner_role.mention if owner_role else owner_role_name
         
         embed = discord.Embed(
             title="Ticket Created",
@@ -328,7 +335,6 @@ async def on_ready():
         print(f"Sync error: {e}")
     print(f"Logged in as {bot.user}")
 
-# === ホワイトリスト追加 ===
 @bot.tree.command(name="whitelist", description="[OWNER] Whitelist a user and give them a key with a specific duration")
 @app_commands.describe(user="The user to whitelist", days="Duration in days (0 or blank for Lifetime)")
 @app_commands.checks.has_permissions(administrator=True)
@@ -358,7 +364,6 @@ async def whitelist_cmd(interaction: discord.Interaction, user: discord.User, da
     
     await interaction.response.send_message(embed=embed, ephemeral=True)
 
-# === ホワイトリスト解除 ===
 @bot.tree.command(name="unwhitelist", description="[OWNER] Remove a user from the whitelist")
 @app_commands.describe(user="The user to remove from whitelist")
 @app_commands.checks.has_permissions(administrator=True)
@@ -370,7 +375,6 @@ async def unwhitelist_cmd(interaction: discord.Interaction, user: discord.User):
         embed = discord.Embed(title="❌ Not Found", description=f"{user.mention} is not in the whitelist.", color=discord.Color.red())
     await interaction.response.send_message(embed=embed, ephemeral=True)
 
-# === ブラックリスト追加 ===
 @bot.tree.command(name="blacklist", description="[OWNER] Blacklist a user from using the bot")
 @app_commands.describe(user="The user to blacklist")
 @app_commands.checks.has_permissions(administrator=True)
@@ -385,7 +389,6 @@ async def blacklist_cmd(interaction: discord.Interaction, user: discord.User):
     )
     await interaction.response.send_message(embed=embed, ephemeral=True)
 
-# === ブラックリスト解除 ===
 @bot.tree.command(name="unblacklist", description="[OWNER] Remove a user from the blacklist")
 @app_commands.describe(user="The user to remove from blacklist")
 @app_commands.checks.has_permissions(administrator=True)
@@ -400,18 +403,22 @@ async def unblacklist_cmd(interaction: discord.Interaction, user: discord.User):
 @bot.tree.command(name="set_roles", description="[OWNER] Set the roles for verification and tickets")
 @app_commands.describe(
     verified_role="Role name to give on 'Get Role'",
-    ticket_owner_role="Role name to mention in tickets"
+    ticket_roles="Role names to mention in tickets (comma separated, e.g. Support, Admin, Mod)"
 )
 @app_commands.checks.has_permissions(administrator=True)
-async def set_roles(interaction: discord.Interaction, verified_role: str = None, ticket_owner_role: str = None):
+async def set_roles(interaction: discord.Interaction, verified_role: str = None, ticket_roles: str = None):
     if verified_role:
         role_config["verified_role"] = verified_role
-    if ticket_owner_role:
-        role_config["ticket_owner_role"] = ticket_owner_role
+    if ticket_roles:
+        # カンマで区切ってリスト化
+        role_list = [r.strip() for r in ticket_roles.split(",")]
+        role_config["ticket_access_roles"] = role_list
         
     embed = discord.Embed(title="⚙️ Role Settings Updated", color=discord.Color.green())
     embed.add_field(name="Verified Role", value=f"`{role_config['verified_role']}`", inline=False)
-    embed.add_field(name="Ticket Owner Role", value=f"`{role_config['ticket_owner_role']}`", inline=False)
+    
+    roles_text = ", ".join([f"`{r}`" for r in role_config["ticket_access_roles"]])
+    embed.add_field(name="Ticket Access Roles", value=roles_text, inline=False)
     await interaction.response.send_message(embed=embed, ephemeral=True)
 
 @bot.tree.command(name="spin_config", description="[OWNER] Configure spin wheel settings and odds")
