@@ -31,11 +31,16 @@ def run_dummy_server():
 # =========================================================
 keys_db = {}
 linked_users = {} 
+
+# スピンのデフォルト設定（4種類の景品）
 spin_config = {
     "cooldown_seconds": 60,
     "win_chance": 40,
     "prizes": [
-        {"name": "1 Day Key", "weight": 100, "hours": 24}
+        {"name": "1 Hour Key", "weight": 50, "hours": 1},
+        {"name": "1 Day Key", "weight": 30, "hours": 24},
+        {"name": "1 Week Key", "weight": 15, "hours": 168},
+        {"name": "Lifetime Key", "weight": 5, "hours": 0} # 0 = Lifetime
     ],
     "last_spin_times": {}
 }
@@ -61,13 +66,13 @@ def create_key(duration_hours=None):
     new_key = ''.join(random.choices(chars, k=16))
     now = datetime.now(timezone.utc)
     expires_at = None
+    # hours が 0 より大きい場合のみ期限を設定（0またはNoneはLifetime）
     if duration_hours and duration_hours > 0:
         expires_at = now + timedelta(hours=duration_hours)
     keys_db[new_key] = {"expires_at": expires_at, "used_by": None}
     return new_key
 
 async def send_key_dm(user: discord.User, key: str, prize_name: str):
-    # DMの時もインラインコード（`）を使ってスッキリさせる
     embed = discord.Embed(
         title="🎉 You Won!",
         description=f"Congratulations! You won a **{prize_name}**.\n\nYour key:\n`{key}`\n\n*Click 'Redeem Key' on the server to use it.*",
@@ -163,7 +168,6 @@ class SpinView(discord.ui.View):
                 )
                 await interaction.followup.send(embed=embed, ephemeral=True)
             else:
-                # ★ ここでインラインコード（`）を使う ★
                 embed = discord.Embed(
                     title="🎉 You Won! (DM Failed)",
                     description=f"Your DMs are closed, here is your key:\n`{key}`",
@@ -301,8 +305,8 @@ async def on_ready():
 
 @bot.tree.command(name="set_roles", description="[OWNER] Set the roles for verification and tickets")
 @app_commands.describe(
-    verified_role="Role name to give on 'Get Role' (e.g., Verified)",
-    ticket_owner_role="Role name to mention in tickets (e.g., Support Team)"
+    verified_role="Role name to give on 'Get Role'",
+    ticket_owner_role="Role name to mention in tickets"
 )
 @app_commands.checks.has_permissions(administrator=True)
 async def set_roles(interaction: discord.Interaction, verified_role: str = None, ticket_owner_role: str = None):
@@ -312,44 +316,47 @@ async def set_roles(interaction: discord.Interaction, verified_role: str = None,
         role_config["ticket_owner_role"] = ticket_owner_role
         
     embed = discord.Embed(title="⚙️ Role Settings Updated", color=discord.Color.green())
-    embed.add_field(name="Verified Role (Get Role)", value=f"`{role_config['verified_role']}`", inline=False)
+    embed.add_field(name="Verified Role", value=f"`{role_config['verified_role']}`", inline=False)
     embed.add_field(name="Ticket Owner Role", value=f"`{role_config['ticket_owner_role']}`", inline=False)
     await interaction.response.send_message(embed=embed, ephemeral=True)
 
-@bot.tree.command(name="spin_config", description="[OWNER] Configure spin wheel settings")
+# === 4種類の景品の確率を個別に設定するコマンド ===
+@bot.tree.command(name="spin_config", description="[OWNER] Configure spin wheel settings and odds")
 @app_commands.describe(
     cooldown="Cooldown in seconds", 
-    win_chance="Win chance %", 
-    prizes="Format: Name:Weight:Hours. e.g., '1 Day:50:24, 4 Days:30:96, Lifetime:20:0' (Use 0 for Lifetime)"
+    win_chance="Overall win chance (0-100%)", 
+    weight_1h="Weight (chance) for 1 Hour Key",
+    weight_1d="Weight (chance) for 1 Day Key",
+    weight_1w="Weight (chance) for 1 Week Key",
+    weight_lt="Weight (chance) for Lifetime Key"
 )
 @app_commands.checks.has_permissions(administrator=True)
-async def spin_config_cmd(interaction: discord.Interaction, cooldown: int = None, win_chance: int = None, prizes: str = None):
+async def spin_config_cmd(
+    interaction: discord.Interaction, 
+    cooldown: int = None, 
+    win_chance: int = None, 
+    weight_1h: int = None,
+    weight_1d: int = None,
+    weight_1w: int = None,
+    weight_lt: int = None
+):
     if cooldown is not None: spin_config["cooldown_seconds"] = cooldown
     if win_chance is not None: spin_config["win_chance"] = max(0, min(100, win_chance))
     
-    if prizes:
-        try:
-            new_prizes = []
-            for p in prizes.split(","):
-                parts = p.strip().split(":")
-                if len(parts) == 3:
-                    new_prizes.append({
-                        "name": parts[0].strip(),
-                        "weight": int(parts[1].strip()),
-                        "hours": int(parts[2].strip())
-                    })
-            if new_prizes:
-                spin_config["prizes"] = new_prizes
-        except ValueError:
-            await interaction.response.send_message("❌ Invalid prize format. Use `Name:Weight:Hours`.", ephemeral=True)
-            return
+    # 景品の重みを更新
+    for p in spin_config["prizes"]:
+        if p["name"] == "1 Hour Key" and weight_1h is not None: p["weight"] = weight_1h
+        if p["name"] == "1 Day Key" and weight_1d is not None: p["weight"] = weight_1d
+        if p["name"] == "1 Week Key" and weight_1w is not None: p["weight"] = weight_1w
+        if p["name"] == "Lifetime Key" and weight_lt is not None: p["weight"] = weight_lt
 
     embed = discord.Embed(title="⚙️ Spin Settings Updated", color=discord.Color.green())
     embed.add_field(name="Cooldown", value=f"`{spin_config['cooldown_seconds']}`s", inline=True)
     embed.add_field(name="Win Chance", value=f"`{spin_config['win_chance']}`%", inline=True)
     
-    prize_list = "\n".join([f"- {p['name']} (Weight: `{p['weight']}`, Hours: `{p['hours']}`)" for p in spin_config["prizes"]])
-    embed.add_field(name="Prizes", value=prize_list, inline=False)
+    prize_list = "\n".join([f"- {p['name']}: `{p['weight']}`" for p in spin_config["prizes"]])
+    embed.add_field(name="Prize Weights", value=prize_list, inline=False)
+    embed.set_footer(text="Higher weight = higher chance of getting that prize.")
     
     await interaction.response.send_message(embed=embed, ephemeral=True)
 
@@ -371,7 +378,11 @@ async def send_embed(interaction: discord.Interaction, title: str, description: 
 @bot.tree.command(name="spin_setup", description="[ADMIN] Post the spin wheel panel")
 @app_commands.checks.has_permissions(administrator=True)
 async def spin_setup(interaction: discord.Interaction):
-    embed = discord.Embed(title="🎰 Spin for Keys", description="Click below to spin and win free keys!", color=discord.Color.gold())
+    embed = discord.Embed(
+        title="🎰 Spin for Keys", 
+        description="Click below to spin and win free keys!\n\n**Prizes:**\n1 Hour, 1 Day, 1 Week, Lifetime", 
+        color=discord.Color.gold()
+    )
     await interaction.response.send_message(embed=embed, view=SpinView())
 
 @bot.tree.command(name="ticket_setup", description="[ADMIN] Post the ticket panel")
@@ -389,13 +400,13 @@ async def ticket_setup(interaction: discord.Interaction):
 @app_commands.choices(duration=[
     app_commands.Choice(name="1 Hour", value="1h"),
     app_commands.Choice(name="1 Day", value="1d"),
-    app_commands.Choice(name="4 Days", value="4d"),
+    app_commands.Choice(name="1 Week", value="1w"),
     app_commands.Choice(name="Lifetime", value="lifetime"),
 ])
 @app_commands.checks.has_permissions(administrator=True)
 async def generatekey(interaction: discord.Interaction, duration: app_commands.Choice[str]):
     if duration.value == "lifetime":
-        key = create_key()
+        key = create_key(duration_hours=0)
         duration_text = "Lifetime"
     elif duration.value == "1h":
         key = create_key(duration_hours=1)
@@ -404,8 +415,8 @@ async def generatekey(interaction: discord.Interaction, duration: app_commands.C
         key = create_key(duration_hours=24)
         duration_text = "1 Day"
     else:
-        key = create_key(duration_hours=96)
-        duration_text = "4 Days"
+        key = create_key(duration_hours=168)
+        duration_text = "1 Week"
     
     embed = discord.Embed(title="🔑 Key Generated", color=discord.Color.green())
     embed.add_field(name="Key", value=f"`{key}`", inline=False)
