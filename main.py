@@ -11,7 +11,7 @@ from discord import app_commands
 from discord.ext import commands
 
 # =========================================================
-# 1. Dummy HTTP Server (For Render)
+# 1. Dummy HTTP Server
 # =========================================================
 class HealthCheckHandler(BaseHTTPRequestHandler):
     def do_GET(self):
@@ -31,13 +31,11 @@ def run_dummy_server():
 # =========================================================
 keys_db = {}
 linked_users = {} 
-
-# スピンの設定（デフォルト値）
 spin_config = {
-    "cooldown_seconds": 60,  # クールダウン（秒）
-    "win_chance": 40,        # 当選確率（%）
-    "prize_weights": {"1h": 50, "1d": 30, "4d": 20}, # 当選した時の景品の割合
-    "last_spin_times": {}    # { user_id: datetime }
+    "cooldown_seconds": 60,
+    "win_chance": 40,
+    "prize_weights": {"1h": 50, "1d": 30, "4d": 20},
+    "last_spin_times": {}
 }
 
 # =========================================================
@@ -54,17 +52,25 @@ bot = commands.Bot(command_prefix="!", intents=intents)
 def create_key(duration_hours=None, duration_days=None):
     chars = string.ascii_uppercase + string.digits
     new_key = ''.join(random.choices(chars, k=16))
-    
     now = datetime.now(timezone.utc)
     expires_at = None
-    
-    if duration_hours:
-        expires_at = now + timedelta(hours=duration_hours)
-    elif duration_days:
-        expires_at = now + timedelta(days=duration_days)
-        
+    if duration_hours: expires_at = now + timedelta(hours=duration_hours)
+    elif duration_days: expires_at = now + timedelta(days=duration_days)
     keys_db[new_key] = {"expires_at": expires_at, "used_by": None}
     return new_key
+
+# DM送信用の関数（エラー対策込み）
+async def send_key_dm(user: discord.User, key: str, prize_name: str):
+    embed = discord.Embed(
+        title="🎉 You Won!",
+        description=f"Congratulations! You won a **{prize_name}**.\n\nYour key (tap to copy):\n```\n{key}\n```\n*Click 'Redeem Key' on the server to use it.*",
+        color=discord.Color.gold()
+    )
+    try:
+        await user.send(embed=embed)
+        return True
+    except discord.Forbidden:
+        return False # DMが閉じている場合
 
 # =========================================================
 # 5. UI: Modals
@@ -114,57 +120,59 @@ class SpinView(discord.ui.View):
         user_id = interaction.user.id
         now = datetime.now(timezone.utc)
         
-        # クールダウンチェック
         if user_id in spin_config["last_spin_times"]:
             last_time = spin_config["last_spin_times"][user_id]
             elapsed = (now - last_time).total_seconds()
             cd = spin_config["cooldown_seconds"]
             if elapsed < cd:
                 remaining = int(cd - elapsed)
-                await interaction.response.send_message(f"⏳ Please wait **{remaining} seconds** before spinning again.", ephemeral=True)
+                await interaction.response.send_message(f"⏳ Please wait **{remaining} seconds**.", ephemeral=True)
                 return
 
-        # クールダウン記録
         spin_config["last_spin_times"][user_id] = now
         
-        # スピン演出
         button.disabled = True
         await interaction.response.edit_message(content="🎰 **Spinning the wheel...**", view=self)
         await asyncio.sleep(1.5)
         
-        # 当選判定
         win_roll = random.randint(1, 100)
         if win_roll > spin_config["win_chance"]:
-            embed = discord.Embed(title="Spin Result", description="❌ **You didn't win this time.** Better luck next time!", color=discord.Color.red())
+            embed = discord.Embed(title="Spin Result", description="❌ **You didn't win this time.**", color=discord.Color.red())
             await interaction.followup.send(embed=embed, ephemeral=True)
         else:
-            # 景品抽選
             weights = spin_config["prize_weights"]
-            prizes = list(weights.keys())
-            weights_list = list(weights.values())
-            prize = random.choices(prizes, weights=weights_list, k=1)[0]
+            prize = random.choices(list(weights.keys()), weights=list(weights.values()), k=1)[0]
             
             if prize == "1h":
                 key = create_key(duration_hours=1)
                 prize_name = "1 Hour Key"
-                color = discord.Color.blue()
             elif prize == "1d":
                 key = create_key(duration_days=1)
                 prize_name = "1 Day Key"
-                color = discord.Color.purple()
             else:
                 key = create_key(duration_days=4)
                 prize_name = "4 Day Key"
-                color = discord.Color.gold()
 
-            embed = discord.Embed(
-                title="🎉 You Won!",
-                description=f"Congratulations! You won a **{prize_name}**.\n\nYour key:\n```\n{key}\n```",
-                color=color
-            )
-            await interaction.followup.send(embed=embed, ephemeral=True)
+            # DM送信を試みる
+            dm_success = await send_key_dm(interaction.user, key, prize_name)
+            
+            if dm_success:
+                # DMが送れたら、チャンネルには「当選しました。DMを確認してください」とだけ表示
+                embed = discord.Embed(
+                    title="🎉 You Won!",
+                    description=f"Congratulations! You won a **{prize_name}**.\n**Please check your DMs** to get the key.\n*(If you don't receive a DM, your privacy settings are blocking it.)*",
+                    color=discord.Color.gold()
+                )
+                await interaction.followup.send(embed=embed, ephemeral=True)
+            else:
+                # DMが送れなかった場合、泣く泣くチャンネルに表示
+                embed = discord.Embed(
+                    title="🎉 You Won! (DM Failed)",
+                    description=f"Your DMs are closed, so here is your key:\n```\n{key}\n```",
+                    color=discord.Color.gold()
+                )
+                await interaction.followup.send(embed=embed, ephemeral=True)
         
-        # ボタンを元に戻す
         button.disabled = False
         try:
             await interaction.edit_original_response(content="Click to spin!", view=self)
@@ -236,86 +244,49 @@ async def on_ready():
         print(f"Sync error: {e}")
     print(f"Logged in as {bot.user}")
 
-# === オーナー専用: スピン設定変更コマンド ===
+# === オーナー専用: スピン設定変更 ===
 @bot.tree.command(name="spin_config", description="[OWNER] Configure spin wheel settings")
-@app_commands.describe(
-    cooldown="Cooldown between spins in seconds",
-    win_chance="Overall win chance (0-100%)",
-    weight_1h="Weight for 1 Hour Key (relative)",
-    weight_1d="Weight for 1 Day Key (relative)",
-    weight_4d="Weight for 4 Day Key (relative)"
-)
-@app_commands.checks.has_permissions(administrator=True) # オーナー(管理者)のみ
-async def spin_config_cmd(
-    interaction: discord.Interaction, 
-    cooldown: int = None, 
-    win_chance: int = None,
-    weight_1h: int = None,
-    weight_1d: int = None,
-    weight_4d: int = None
-):
+@app_commands.describe(cooldown="Cooldown in seconds", win_chance="Win chance %", weight_1h="1H weight", weight_1d="1D weight", weight_4d="4D weight")
+@app_commands.checks.has_permissions(administrator=True)
+async def spin_config_cmd(interaction: discord.Interaction, cooldown: int = None, win_chance: int = None, weight_1h: int = None, weight_1d: int = None, weight_4d: int = None):
     if cooldown is not None: spin_config["cooldown_seconds"] = cooldown
-    if win_chance is not None:
-        spin_config["win_chance"] = max(0, min(100, win_chance)) # 0~100に制限
+    if win_chance is not None: spin_config["win_chance"] = max(0, min(100, win_chance))
     if weight_1h is not None: spin_config["prize_weights"]["1h"] = weight_1h
     if weight_1d is not None: spin_config["prize_weights"]["1d"] = weight_1d
     if weight_4d is not None: spin_config["prize_weights"]["4d"] = weight_4d
-
     w = spin_config["prize_weights"]
     embed = discord.Embed(title="⚙️ Spin Settings Updated", color=discord.Color.green())
-    embed.add_field(name="Cooldown", value=f"{spin_config['cooldown_seconds']} seconds", inline=False)
-    embed.add_field(name="Win Chance", value=f"{spin_config['win_chance']}%", inline=False)
-    embed.add_field(name="Prize Weights", value=f"1H: {w['1h']} | 1D: {w['1d']} | 4D: {w['4d']}", inline=False)
+    embed.add_field(name="Cooldown", value=f"{spin_config['cooldown_seconds']}s", inline=True)
+    embed.add_field(name="Win Chance", value=f"{spin_config['win_chance']}%", inline=True)
+    embed.add_field(name="Weights", value=f"1H:{w['1h']} | 1D:{w['1d']} | 4D:{w['4d']}", inline=False)
     await interaction.response.send_message(embed=embed, ephemeral=True)
 
-# === オーナー専用: カスタム埋め込み投稿コマンド ===
-@bot.tree.command(name="send_embed", description="[OWNER] Send a fully customized embed")
-@app_commands.describe(
-    title="Embed title",
-    description="Embed description (can use \\n for new lines)",
-    color_hex="Color in HEX (e.g., ff0000 for red, 00ff00 for green)",
-    footer="Footer text",
-    image_url="URL of an image to display"
-)
+# === オーナー専用: 埋め込み投稿 ===
+@bot.tree.command(name="send_embed", description="[OWNER] Send a customized embed")
+@app_commands.describe(title="Title", description="Description", color_hex="Hex color (e.g. ff0000)", footer="Footer", image_url="Image URL")
 @app_commands.checks.has_permissions(administrator=True)
-async def send_embed(
-    interaction: discord.Interaction,
-    title: str,
-    description: str,
-    color_hex: str = "5865F2", # Default Discord Blurple
-    footer: str = None,
-    image_url: str = None
-):
+async def send_embed(interaction: discord.Interaction, title: str, description: str, color_hex: str = "5865F2", footer: str = None, image_url: str = None):
     try:
-        # HEXカラーをDiscordのカラーコードに変換
         color = discord.Color(int(color_hex.replace("#", ""), 16))
     except ValueError:
-        await interaction.response.send_message("❌ Invalid HEX color. Please use a format like `ff0000`.", ephemeral=True)
+        await interaction.response.send_message("❌ Invalid HEX color.", ephemeral=True)
         return
-
     embed = discord.Embed(title=title, description=description, color=color)
-    if footer:
-        embed.set_footer(text=footer)
-    if image_url:
-        embed.set_image(url=image_url)
-
-    await interaction.response.send_message("✅ Embed sent!", ephemeral=True)
+    if footer: embed.set_footer(text=footer)
+    if image_url: embed.set_image(url=image_url)
+    await interaction.response.send_message("✅ Sent!", ephemeral=True)
     await interaction.channel.send(embed=embed)
 
-# === スピンパネル設置コマンド ===
+# === スピンパネル設置 ===
 @bot.tree.command(name="spin_setup", description="[ADMIN] Post the spin wheel panel")
 @app_commands.checks.has_permissions(administrator=True)
 async def spin_setup(interaction: discord.Interaction):
-    embed = discord.Embed(
-        title="🎰 Spin for Keys",
-        description="Feeling lucky? Click the button below to spin the wheel and win free access keys!\n\n**Prizes:**\n- 1 Hour Key\n- 1 Day Key\n- 4 Day Key",
-        color=discord.Color.gold()
-    )
+    embed = discord.Embed(title="🎰 Spin for Keys", description="Click below to spin and win free keys!", color=discord.Color.gold())
     await interaction.response.send_message(embed=embed, view=SpinView())
 
-# === キー生成コマンド ===
-@bot.tree.command(name="generatekey", description="[ADMIN] Generate a new 16-character access key")
-@app_commands.describe(duration="Select the duration")
+# === キー生成 ===
+@bot.tree.command(name="generatekey", description="[ADMIN] Generate a key")
+@app_commands.describe(duration="Duration")
 @app_commands.choices(duration=[
     app_commands.Choice(name="1 Hour", value="1h"),
     app_commands.Choice(name="1 Day", value="1d"),
@@ -345,11 +316,7 @@ async def generatekey(interaction: discord.Interaction, duration: app_commands.C
 # === メインパネル設置 ===
 @bot.tree.command(name="panel", description="Post the main access panel")
 async def panel(interaction: discord.Interaction):
-    embed = discord.Embed(
-        title="Panel Access",
-        description="Purchase or win a key to unlock the panel.\n**Flow:**\n`Buy/Win Key ➔ Redeem Key ➔ Link Account ➔ Access Panel`",
-        color=discord.Color.blue()
-    )
+    embed = discord.Embed(title="Panel Access", description="Win or buy a key to unlock.\n`Win/Buy ➔ Redeem ➔ Link ➔ Access`", color=discord.Color.blue())
     await interaction.response.send_message(embed=embed, view=PanelView())
 
 # =========================================================
