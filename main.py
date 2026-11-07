@@ -31,8 +31,9 @@ def run_dummy_server():
 # =========================================================
 keys_db = {}
 linked_users = {} 
+whitelist = set()   
+blacklist = set()   
 
-# スピンのデフォルト設定（4種類の景品）
 spin_config = {
     "cooldown_seconds": 60,
     "win_chance": 40,
@@ -40,7 +41,7 @@ spin_config = {
         {"name": "1 Hour Key", "weight": 50, "hours": 1},
         {"name": "1 Day Key", "weight": 30, "hours": 24},
         {"name": "1 Week Key", "weight": 15, "hours": 168},
-        {"name": "Lifetime Key", "weight": 5, "hours": 0} # 0 = Lifetime
+        {"name": "Lifetime Key", "weight": 5, "hours": 0}
     ],
     "last_spin_times": {}
 }
@@ -66,7 +67,6 @@ def create_key(duration_hours=None):
     new_key = ''.join(random.choices(chars, k=16))
     now = datetime.now(timezone.utc)
     expires_at = None
-    # hours が 0 より大きい場合のみ期限を設定（0またはNoneはLifetime）
     if duration_hours and duration_hours > 0:
         expires_at = now + timedelta(hours=duration_hours)
     keys_db[new_key] = {"expires_at": expires_at, "used_by": None}
@@ -98,6 +98,10 @@ class RedeemModal(discord.ui.Modal, title="Redeem Key"):
     )
 
     async def on_submit(self, interaction: discord.Interaction):
+        if interaction.user.id in blacklist:
+            await interaction.response.send_message("❌ You are blacklisted.", ephemeral=True)
+            return
+
         key = self.key_input.value.strip().upper()
         if key not in keys_db:
             await interaction.response.send_message("❌ Invalid key.", ephemeral=True)
@@ -117,6 +121,9 @@ class LinkUserModal(discord.ui.Modal, title="Link Roblox User"):
     username_input = discord.ui.TextInput(label="Roblox Username", style=discord.TextStyle.short, required=True)
 
     async def on_submit(self, interaction: discord.Interaction):
+        if interaction.user.id in blacklist:
+            await interaction.response.send_message("❌ You are blacklisted.", ephemeral=True)
+            return
         linked_users[interaction.user.id] = self.username_input.value
         await interaction.response.send_message(f"✅ Linked to Roblox user: `{self.username_input.value}`", ephemeral=True)
 
@@ -129,6 +136,10 @@ class SpinView(discord.ui.View):
 
     @discord.ui.button(label="Spin for Keys", style=discord.ButtonStyle.success, emoji="🎰", custom_id="btn_spin")
     async def spin(self, interaction: discord.Interaction, button: discord.ui.Button):
+        if interaction.user.id in blacklist:
+            await interaction.response.send_message("❌ You are blacklisted.", ephemeral=True)
+            return
+
         user_id = interaction.user.id
         now = datetime.now(timezone.utc)
         
@@ -190,6 +201,10 @@ class TicketPanelView(discord.ui.View):
 
     @discord.ui.button(label="Create Ticket", style=discord.ButtonStyle.success, emoji="🎫", custom_id="btn_create_ticket")
     async def create_ticket(self, interaction: discord.Interaction, button: discord.ui.Button):
+        if interaction.user.id in blacklist:
+            await interaction.response.send_message("❌ You are blacklisted.", ephemeral=True)
+            return
+
         guild = interaction.guild
         owner_role_name = role_config["ticket_owner_role"]
         owner_role = discord.utils.get(guild.roles, name=owner_role_name)
@@ -243,10 +258,17 @@ class PanelView(discord.ui.View):
 
     @discord.ui.button(label="Redeem Key", style=discord.ButtonStyle.success, emoji="🔑", custom_id="btn_redeem")
     async def redeem_key(self, interaction: discord.Interaction, button: discord.ui.Button):
+        if interaction.user.id in blacklist:
+            await interaction.response.send_message("❌ You are blacklisted.", ephemeral=True)
+            return
         await interaction.response.send_modal(RedeemModal())
 
     @discord.ui.button(label="Get Role", style=discord.ButtonStyle.primary, emoji="👤", custom_id="btn_role")
     async def get_role(self, interaction: discord.Interaction, button: discord.ui.Button):
+        if interaction.user.id in blacklist:
+            await interaction.response.send_message("❌ You are blacklisted.", ephemeral=True)
+            return
+
         user_has_key = any(data["used_by"] == interaction.user.id for data in keys_db.values())
         if not user_has_key:
             await interaction.response.send_message("❌ You must redeem a valid key first.", ephemeral=True)
@@ -266,6 +288,9 @@ class PanelView(discord.ui.View):
 
     @discord.ui.button(label="Link User", style=discord.ButtonStyle.secondary, emoji="🔗", custom_id="btn_link")
     async def link_user(self, interaction: discord.Interaction, button: discord.ui.Button):
+        if interaction.user.id in blacklist:
+            await interaction.response.send_message("❌ You are blacklisted.", ephemeral=True)
+            return
         await interaction.response.send_modal(LinkUserModal())
 
     @discord.ui.button(label="Stats", style=discord.ButtonStyle.primary, emoji="📊", custom_id="btn_stats")
@@ -303,6 +328,55 @@ async def on_ready():
         print(f"Sync error: {e}")
     print(f"Logged in as {bot.user}")
 
+# === ホワイトリスト追加コマンド（期限指定可能） ===
+@bot.tree.command(name="whitelist", description="[OWNER] Whitelist a user and give them a key with a specific duration")
+@app_commands.describe(
+    user="The user to whitelist",
+    days="Duration in days (0 or blank for Lifetime)"
+)
+@app_commands.checks.has_permissions(administrator=True)
+async def whitelist_cmd(interaction: discord.Interaction, user: discord.User, days: int = 0):
+    whitelist.add(user.id)
+    blacklist.discard(user.id)
+    
+    # 期限の計算（daysが0ならLifetime）
+    duration_hours = days * 24
+    key = create_key(duration_hours=duration_hours if days > 0 else 0)
+    
+    if days == 0:
+        duration_text = "Lifetime"
+    elif days == 1:
+        duration_text = "1 Day"
+    else:
+        duration_text = f"{days} Days"
+    
+    embed = discord.Embed(
+        title="✅ You are Whitelisted!",
+        description=f"You have been whitelisted by {interaction.user.mention}.\n\nHere is your **{duration_text} Key**:\n`{key}`\n\n*You can now use this key to redeem and access the panel.*",
+        color=discord.Color.green()
+    )
+    if days == 0:
+        embed.set_footer(text="This key will never expire.")
+    else:
+        embed.set_footer(text=f"This key is valid for {days} day(s).")
+    
+    await interaction.response.send_message(embed=embed, ephemeral=True)
+
+# === ブラックリスト追加コマンド ===
+@bot.tree.command(name="blacklist", description="[OWNER] Blacklist a user from using the bot")
+@app_commands.describe(user="The user to blacklist")
+@app_commands.checks.has_permissions(administrator=True)
+async def blacklist_cmd(interaction: discord.Interaction, user: discord.User):
+    blacklist.add(user.id)
+    whitelist.discard(user.id)
+    
+    embed = discord.Embed(
+        title="🚫 User Blacklisted",
+        description=f"{user.mention} has been blacklisted. They can no longer use the panel or commands.",
+        color=discord.Color.red()
+    )
+    await interaction.response.send_message(embed=embed, ephemeral=True)
+
 @bot.tree.command(name="set_roles", description="[OWNER] Set the roles for verification and tickets")
 @app_commands.describe(
     verified_role="Role name to give on 'Get Role'",
@@ -320,15 +394,14 @@ async def set_roles(interaction: discord.Interaction, verified_role: str = None,
     embed.add_field(name="Ticket Owner Role", value=f"`{role_config['ticket_owner_role']}`", inline=False)
     await interaction.response.send_message(embed=embed, ephemeral=True)
 
-# === 4種類の景品の確率を個別に設定するコマンド ===
 @bot.tree.command(name="spin_config", description="[OWNER] Configure spin wheel settings and odds")
 @app_commands.describe(
     cooldown="Cooldown in seconds", 
     win_chance="Overall win chance (0-100%)", 
-    weight_1h="Weight (chance) for 1 Hour Key",
-    weight_1d="Weight (chance) for 1 Day Key",
-    weight_1w="Weight (chance) for 1 Week Key",
-    weight_lt="Weight (chance) for Lifetime Key"
+    weight_1h="Weight for 1 Hour Key",
+    weight_1d="Weight for 1 Day Key",
+    weight_1w="Weight for 1 Week Key",
+    weight_lt="Weight for Lifetime Key"
 )
 @app_commands.checks.has_permissions(administrator=True)
 async def spin_config_cmd(
@@ -343,7 +416,6 @@ async def spin_config_cmd(
     if cooldown is not None: spin_config["cooldown_seconds"] = cooldown
     if win_chance is not None: spin_config["win_chance"] = max(0, min(100, win_chance))
     
-    # 景品の重みを更新
     for p in spin_config["prizes"]:
         if p["name"] == "1 Hour Key" and weight_1h is not None: p["weight"] = weight_1h
         if p["name"] == "1 Day Key" and weight_1d is not None: p["weight"] = weight_1d
@@ -356,7 +428,6 @@ async def spin_config_cmd(
     
     prize_list = "\n".join([f"- {p['name']}: `{p['weight']}`" for p in spin_config["prizes"]])
     embed.add_field(name="Prize Weights", value=prize_list, inline=False)
-    embed.set_footer(text="Higher weight = higher chance of getting that prize.")
     
     await interaction.response.send_message(embed=embed, ephemeral=True)
 
@@ -396,15 +467,16 @@ async def ticket_setup(interaction: discord.Interaction):
     await interaction.response.send_message(embed=embed, view=TicketPanelView())
 
 @bot.tree.command(name="generatekey", description="[ADMIN] Generate a key")
-@app_commands.describe(duration="Duration")
+@app_commands.describe(duration="Duration", custom_days="Custom days (if applicable)")
 @app_commands.choices(duration=[
     app_commands.Choice(name="1 Hour", value="1h"),
     app_commands.Choice(name="1 Day", value="1d"),
     app_commands.Choice(name="1 Week", value="1w"),
     app_commands.Choice(name="Lifetime", value="lifetime"),
+    app_commands.Choice(name="Custom (Use custom_days)", value="custom")
 ])
 @app_commands.checks.has_permissions(administrator=True)
-async def generatekey(interaction: discord.Interaction, duration: app_commands.Choice[str]):
+async def generatekey(interaction: discord.Interaction, duration: app_commands.Choice[str], custom_days: int = None):
     if duration.value == "lifetime":
         key = create_key(duration_hours=0)
         duration_text = "Lifetime"
@@ -414,9 +486,15 @@ async def generatekey(interaction: discord.Interaction, duration: app_commands.C
     elif duration.value == "1d":
         key = create_key(duration_hours=24)
         duration_text = "1 Day"
-    else:
+    elif duration.value == "1w":
         key = create_key(duration_hours=168)
         duration_text = "1 Week"
+    elif duration.value == "custom":
+        if not custom_days or custom_days <= 0:
+            await interaction.response.send_message("❌ Please specify `custom_days` greater than 0.", ephemeral=True)
+            return
+        key = create_key(duration_hours=custom_days * 24)
+        duration_text = f"{custom_days} Days"
     
     embed = discord.Embed(title="🔑 Key Generated", color=discord.Color.green())
     embed.add_field(name="Key", value=f"`{key}`", inline=False)
