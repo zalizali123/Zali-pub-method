@@ -254,7 +254,21 @@ class TicketControlView(discord.ui.View):
         await interaction.channel.delete()
 
 # =========================================================
-# 8. UI: Main Panel View
+# 8. UI: Link View (New!)
+# =========================================================
+class LinkButtonView(discord.ui.View):
+    def __init__(self, url: str, label: str):
+        super().__init__(timeout=None)
+        # リンクボタンを動的に追加
+        self.add_item(discord.ui.Button(
+            label=label,
+            style=discord.ButtonStyle.link,
+            url=url,
+            emoji="🎮"
+        ))
+
+# =========================================================
+# 9. UI: Main Panel View
 # =========================================================
 class PanelView(discord.ui.View):
     def __init__(self):
@@ -317,7 +331,7 @@ class PanelView(discord.ui.View):
         await interaction.response.send_message(embed=embed, ephemeral=True)
 
 # =========================================================
-# 9. Commands
+# 10. Commands
 # =========================================================
 @bot.event
 async def on_ready():
@@ -332,9 +346,30 @@ async def on_ready():
         print(f"Sync error: {e}")
     print(f"Logged in as {bot.user}")
 
-# === /clear コマンド (新規追加) ===
+# === /link コマンド (新規追加) ===
+@bot.tree.command(name="link", description="[ADMIN] Send a message with a clickable link button")
+@app_commands.describe(
+    url="The URL to link to", 
+    label="The text to display on the button (default: Game link)"
+)
+@app_commands.checks.has_permissions(administrator=True)
+async def link_cmd(interaction: discord.Interaction, url: str, label: str = "Game link"):
+    # 埋め込みを作成（画像の雰囲気に合わせる）
+    embed = discord.Embed(
+        description="Click the button below to join the game.",
+        color=discord.Color.dark_theme()
+    )
+    
+    view = LinkButtonView(url=url, label=label)
+    
+    # コマンド実行者にだけ見える確認メッセージ
+    await interaction.response.send_message("✅ Link panel sent!", ephemeral=True)
+    # チャンネルに投稿
+    await interaction.channel.send(embed=embed, view=view)
+
+# === /clear コマンド ===
 @bot.tree.command(name="clear", description="Clear messages in the current channel")
-@app_commands.describe(amount="Number of messages to delete (default: 100, max: 100 per batch)")
+@app_commands.describe(amount="Number of messages to delete (default: 100)")
 @app_commands.checks.has_permissions(manage_messages=True)
 async def clear_cmd(interaction: discord.Interaction, amount: int = 100):
     if amount < 1:
@@ -344,7 +379,6 @@ async def clear_cmd(interaction: discord.Interaction, amount: int = 100):
     await interaction.response.defer(ephemeral=True)
     
     try:
-        # 10回までループして最大1000件まで消せるようにする（必要なら調整）
         deleted_count = 0
         while amount > 0:
             to_delete = min(amount, 100)
@@ -353,7 +387,7 @@ async def clear_cmd(interaction: discord.Interaction, amount: int = 100):
             amount -= to_delete
             
             if len(deleted) < to_delete:
-                break # 消せるメッセージがなくなったら終了
+                break
                 
         embed = discord.Embed(
             title="🧹 Channel Cleared",
@@ -575,7 +609,7 @@ async def panel(interaction: discord.Interaction):
     await interaction.response.send_message(embed=embed, view=PanelView())
 
 # =========================================================
-# 10. Start
+# 11. Start
 # =========================================================
 if __name__ == "__main__":
     threading.Thread(target=run_dummy_server, daemon=True).start()
