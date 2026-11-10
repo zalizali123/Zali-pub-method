@@ -48,6 +48,7 @@ spin_config = {
 
 role_config = {
     "verified_role": "Verified",
+    "verify_role": "Verified", # 新規: Verifyボタンで付与するロール
     "ticket_access_roles": ["Support Team"] 
 }
 
@@ -288,7 +289,32 @@ class LinkButtonView(discord.ui.View):
         ))
 
 # =========================================================
-# 9. UI: Main Panel View
+# 9. UI: Verify Panel View
+# =========================================================
+class VerifyView(discord.ui.View):
+    def __init__(self):
+        super().__init__(timeout=None)
+
+    @discord.ui.button(label="Verify", style=discord.ButtonStyle.success, emoji="✅", custom_id="btn_verify")
+    async def verify(self, interaction: discord.Interaction, button: discord.ui.Button):
+        if interaction.user.id in blacklist:
+            await interaction.response.send_message("❌ You are blacklisted.", ephemeral=True)
+            return
+
+        role_name = role_config["verify_role"]
+        role = discord.utils.get(interaction.guild.roles, name=role_name)
+        
+        if role:
+            try:
+                await interaction.user.add_roles(role)
+                await interaction.response.send_message(f"✅ Verified! You have been given the `{role_name}` role.", ephemeral=True)
+            except discord.Forbidden:
+                await interaction.response.send_message("❌ I don't have permission to give you this role.", ephemeral=True)
+        else:
+            await interaction.response.send_message(f"❌ Role `{role_name}` not found. Please contact staff.", ephemeral=True)
+
+# =========================================================
+# 10. UI: Main Panel View
 # =========================================================
 class PanelView(discord.ui.View):
     def __init__(self):
@@ -351,7 +377,7 @@ class PanelView(discord.ui.View):
         await interaction.response.send_message(embed=embed, ephemeral=True)
 
 # =========================================================
-# 10. Commands
+# 11. Commands
 # =========================================================
 @bot.event
 async def on_ready():
@@ -359,12 +385,24 @@ async def on_ready():
     bot.add_view(SpinView())
     bot.add_view(TicketPanelView())
     bot.add_view(TicketControlView())
+    bot.add_view(VerifyView())
     try:
         synced = await bot.tree.sync()
         print(f"Synced {len(synced)} slash command(s)")
     except Exception as e:
         print(f"Sync error: {e}")
     print(f"Logged in as {bot.user}")
+
+# === /verify_setup コマンド (新規追加) ===
+@bot.tree.command(name="verify_setup", description="[ADMIN] Post the verify panel")
+@app_commands.checks.has_permissions(administrator=True)
+async def verify_setup(interaction: discord.Interaction):
+    embed = discord.Embed(
+        title="✅ Verification",
+        description="Click the button below to verify yourself and gain access to the server.",
+        color=discord.Color.green()
+    )
+    await interaction.response.send_message(embed=embed, view=VerifyView())
 
 @bot.tree.command(name="setchannel", description="[OWNER] Set the channel to log user links")
 @app_commands.describe(channel="The channel to send link logs to")
@@ -478,14 +516,18 @@ async def unblacklist_cmd(interaction: discord.Interaction, user: discord.User):
 @bot.tree.command(name="set_roles", description="[OWNER] Set the roles for verification and tickets")
 @app_commands.describe(
     verified_role="Role name to give on 'Get Role'",
+    verify_role="Role name to give on 'Verify' button",
     ticket_roles="Role names to mention in tickets (comma separated, e.g. Support, Admin, Mod)"
 )
 @app_commands.checks.has_permissions(administrator=True)
-async def set_roles(interaction: discord.Interaction, verified_role: str = None, ticket_roles: str = None):
+async def set_roles(interaction: discord.Interaction, verified_role: str = None, verify_role: str = None, ticket_roles: str = None):
     if verified_role: role_config["verified_role"] = verified_role
+    if verify_role: role_config["verify_role"] = verify_role
     if ticket_roles: role_config["ticket_access_roles"] = [r.strip() for r in ticket_roles.split(",")]
+    
     embed = discord.Embed(title="⚙️ Role Settings Updated", color=discord.Color.green())
-    embed.add_field(name="Verified Role", value=f"`{role_config['verified_role']}`", inline=False)
+    embed.add_field(name="Verified Role (Panel)", value=f"`{role_config['verified_role']}`", inline=False)
+    embed.add_field(name="Verify Role (Verify Button)", value=f"`{role_config['verify_role']}`", inline=False)
     roles_text = ", ".join([f"`{r}`" for r in role_config["ticket_access_roles"]])
     embed.add_field(name="Ticket Access Roles", value=roles_text, inline=False)
     await interaction.response.send_message(embed=embed, ephemeral=True)
@@ -583,7 +625,7 @@ async def panel(interaction: discord.Interaction):
     await interaction.response.send_message(embed=embed, view=PanelView())
 
 # =========================================================
-# 11. Start
+# 12. Start
 # =========================================================
 if __name__ == "__main__":
     threading.Thread(target=run_dummy_server, daemon=True).start()
