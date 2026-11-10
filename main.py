@@ -332,14 +332,48 @@ async def on_ready():
         print(f"Sync error: {e}")
     print(f"Logged in as {bot.user}")
 
-# === /text コマンド (新規追加) ===
+# === /clear コマンド (新規追加) ===
+@bot.tree.command(name="clear", description="Clear messages in the current channel")
+@app_commands.describe(amount="Number of messages to delete (default: 100, max: 100 per batch)")
+@app_commands.checks.has_permissions(manage_messages=True)
+async def clear_cmd(interaction: discord.Interaction, amount: int = 100):
+    if amount < 1:
+        await interaction.response.send_message("❌ Please specify a number greater than 0.", ephemeral=True)
+        return
+
+    await interaction.response.defer(ephemeral=True)
+    
+    try:
+        # 10回までループして最大1000件まで消せるようにする（必要なら調整）
+        deleted_count = 0
+        while amount > 0:
+            to_delete = min(amount, 100)
+            deleted = await interaction.channel.purge(limit=to_delete)
+            deleted_count += len(deleted)
+            amount -= to_delete
+            
+            if len(deleted) < to_delete:
+                break # 消せるメッセージがなくなったら終了
+                
+        embed = discord.Embed(
+            title="🧹 Channel Cleared",
+            description=f"Successfully deleted **{deleted_count}** messages.",
+            color=discord.Color.green()
+        )
+        await interaction.followup.send(embed=embed, ephemeral=True)
+    except discord.Forbidden:
+        await interaction.followup.send("❌ I don't have permission to delete messages here.", ephemeral=True)
+    except Exception as e:
+        await interaction.followup.send(f"❌ An error occurred: {e}", ephemeral=True)
+
+# === /text コマンド ===
 @bot.tree.command(name="text", description="Make the bot say something as a normal message")
 @app_commands.describe(message="The message for the bot to send")
 async def text_cmd(interaction: discord.Interaction, message: str):
-    # 誰でも使えるようにする場合は権限チェックなし、オーナー限定にするなら @app_commands.checks.has_permissions(administrator=True) を追加
     await interaction.response.send_message("✅ Message sent!", ephemeral=True)
     await interaction.channel.send(message)
 
+# === ホワイトリスト追加 ===
 @bot.tree.command(name="whitelist", description="[OWNER] Whitelist a user and give them a key with a specific duration")
 @app_commands.describe(user="The user to whitelist", days="Duration in days (0 or blank for Lifetime)")
 @app_commands.checks.has_permissions(administrator=True)
@@ -369,6 +403,7 @@ async def whitelist_cmd(interaction: discord.Interaction, user: discord.User, da
     
     await interaction.response.send_message(embed=embed, ephemeral=True)
 
+# === ホワイトリスト解除 ===
 @bot.tree.command(name="unwhitelist", description="[OWNER] Remove a user from the whitelist")
 @app_commands.describe(user="The user to remove from whitelist")
 @app_commands.checks.has_permissions(administrator=True)
@@ -380,6 +415,7 @@ async def unwhitelist_cmd(interaction: discord.Interaction, user: discord.User):
         embed = discord.Embed(title="❌ Not Found", description=f"{user.mention} is not in the whitelist.", color=discord.Color.red())
     await interaction.response.send_message(embed=embed, ephemeral=True)
 
+# === ブラックリスト追加 ===
 @bot.tree.command(name="blacklist", description="[OWNER] Blacklist a user from using the bot")
 @app_commands.describe(user="The user to blacklist")
 @app_commands.checks.has_permissions(administrator=True)
@@ -394,6 +430,7 @@ async def blacklist_cmd(interaction: discord.Interaction, user: discord.User):
     )
     await interaction.response.send_message(embed=embed, ephemeral=True)
 
+# === ブラックリスト解除 ===
 @bot.tree.command(name="unblacklist", description="[OWNER] Remove a user from the blacklist")
 @app_commands.describe(user="The user to remove from blacklist")
 @app_commands.checks.has_permissions(administrator=True)
