@@ -46,10 +46,9 @@ spin_config = {
     "last_spin_times": {}
 }
 
-# ロール設定（複数ロール対応のためリスト形式に変更）
 role_config = {
     "verified_role": "Verified",
-    "ticket_access_roles": ["Support Team"] # デフォルトのアクセスロール
+    "ticket_access_roles": ["Support Team"] 
 }
 
 # =========================================================
@@ -214,14 +213,12 @@ class TicketPanelView(discord.ui.View):
             await interaction.response.send_message(f"❌ You already have an open ticket: {existing_channel.mention}", ephemeral=True)
             return
 
-        # デフォルトの権限設定
         overwrites = {
             guild.default_role: discord.PermissionOverwrite(read_messages=False),
             interaction.user: discord.PermissionOverwrite(read_messages=True, send_messages=True),
             guild.me: discord.PermissionOverwrite(read_messages=True, send_messages=True)
         }
 
-        # 設定されたすべてのロールに権限を付与
         mention_list = []
         for r_name in access_role_names:
             role = discord.utils.get(guild.roles, name=r_name.strip())
@@ -335,6 +332,14 @@ async def on_ready():
         print(f"Sync error: {e}")
     print(f"Logged in as {bot.user}")
 
+# === /text コマンド (新規追加) ===
+@bot.tree.command(name="text", description="Make the bot say something as a normal message")
+@app_commands.describe(message="The message for the bot to send")
+async def text_cmd(interaction: discord.Interaction, message: str):
+    # 誰でも使えるようにする場合は権限チェックなし、オーナー限定にするなら @app_commands.checks.has_permissions(administrator=True) を追加
+    await interaction.response.send_message("✅ Message sent!", ephemeral=True)
+    await interaction.channel.send(message)
+
 @bot.tree.command(name="whitelist", description="[OWNER] Whitelist a user and give them a key with a specific duration")
 @app_commands.describe(user="The user to whitelist", days="Duration in days (0 or blank for Lifetime)")
 @app_commands.checks.has_permissions(administrator=True)
@@ -410,7 +415,6 @@ async def set_roles(interaction: discord.Interaction, verified_role: str = None,
     if verified_role:
         role_config["verified_role"] = verified_role
     if ticket_roles:
-        # カンマで区切ってリスト化
         role_list = [r.strip() for r in ticket_roles.split(",")]
         role_config["ticket_access_roles"] = role_list
         
