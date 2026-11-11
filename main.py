@@ -37,13 +37,15 @@ user_coins = {}
 user_spins = {} 
 
 spin_config = {
+    "cooldown_seconds": 60, # 無料スピンのクールダウン
     "win_chance": 40,
     "prizes": [
         {"name": "1 Hour Key", "weight": 50, "hours": 1},
         {"name": "1 Day Key", "weight": 30, "hours": 24},
         {"name": "1 Week Key", "weight": 15, "hours": 168},
         {"name": "Lifetime Key", "weight": 5, "hours": 0}
-    ]
+    ],
+    "last_spin_times": {} # クールダウン管理用
 }
 
 role_config = {
@@ -165,7 +167,7 @@ class LinkUserModal(discord.ui.Modal, title="Link Roblox User"):
                     pass
 
 # =========================================================
-# 6. UI: Spin Game View
+# 6. UI: Spin Game View (Cooldown + Tickets)
 # =========================================================
 class SpinView(discord.ui.View):
     def __init__(self):
@@ -178,12 +180,29 @@ class SpinView(discord.ui.View):
             return
 
         user_id = interaction.user.id
-        spins = get_spins(user_id)
-        if spins <= 0:
-            await interaction.response.send_message("❌ You don't have any spin tickets! Buy one in the coin shop.", ephemeral=True)
-            return
+        now = datetime.now(timezone.utc)
+        
+        # クールダウンとチケットの判定
+        can_free_spin = False
+        if user_id not in spin_config["last_spin_times"]:
+            can_free_spin = True
+        else:
+            last_time = spin_config["last_spin_times"][user_id]
+            elapsed = (now - last_time).total_seconds()
+            if elapsed >= spin_config["cooldown_seconds"]:
+                can_free_spin = True
 
-        user_spins[user_id] = spins - 1
+        if can_free_spin:
+            # 無料スピンを実行
+            spin_config["last_spin_times"][user_id] = now
+        else:
+            # クールダウン中 -> チケットを消費
+            spins = get_spins(user_id)
+            if spins <= 0:
+                remaining = int(spin_config["cooldown_seconds"] - (now - spin_config["last_spin_times"][user_id]).total_seconds())
+                await interaction.response.send_message(f"⏳ Please wait `{remaining}` seconds for a free spin, or buy a Spin Ticket in the shop!", ephemeral=True)
+                return
+            user_spins[user_id] = spins - 1
 
         button.disabled = True
         await interaction.response.edit_message(content="🎰 **Spinning...**", view=self)
@@ -214,7 +233,57 @@ class SpinView(discord.ui.View):
         except: pass
 
 # =========================================================
-# 7. UI: Ticket System Views
+# 7. UI: Shop System Views
+# =========================================================
+class ShopSelect(discord.ui.Select):
+    def __init__(self):
+        options = []
+        for key, item in coin_shop_items.items():
+            options.append(discord.SelectOption(
+                label=item["name"],
+                description=f"Price: {item['price']} Coins",
+                value=key
+            ))
+        super().__init__(placeholder="Select an item to buy...", min_values=1, max_values=1, options=options)
+
+    async def callback(self, interaction: discord.Interaction):
+        if interaction.user.id in blacklist:
+            await interaction.response.send_message("❌ You are blacklisted.", ephemeral=True)
+            return
+
+        item_id = self.values[0]
+        item_data = coin_shop_items[item_id]
+        price = item_data["price"]
+        user_id = interaction.user.id
+        
+        if get_coins(user_id) < price:
+            await interaction.response.send_message(f"❌ Not enough coins! You need `{price - get_coins(user_id)}` more.", ephemeral=True)
+            return
+            
+        user_coins[user_id] = get_coins(user_id) - price
+        
+        if item_data["type"] == "key":
+            key = create_key(item_data.get("hours", 0))
+            dm_success = await send_key_dm(interaction.user, key, item_data["name"])
+            if dm_success:
+                await interaction.response.send_message(f"✅ Bought **{item_data['name']}**! Please check your DMs.", ephemeral=True)
+            else:
+                await interaction.response.send_message(f"✅ Bought **{item_data['name']}**! Here is your key (DMs closed):\n`{key}`", ephemeral=True)
+                
+        elif item_data["type"] == "spin":
+            add_spins(user_id, 1)
+            await interaction.response.send_message(f"✅ Bought **{item_data['name']}**! You can now use it on the Spin panel.", ephemeral=True)
+            
+        elif item_data["type"] == "custom":
+            await interaction.response.send_message(f"✅ Bought **{item_data['name']}**! Please contact staff to claim it.", ephemeral=True)
+
+class ShopView(discord.ui.View):
+    def __init__(self):
+        super().__init__(timeout=None)
+        self.add_item(ShopSelect())
+
+# =========================================================
+# 8. UI: Ticket System Views
 # =========================================================
 class TicketPanelView(discord.ui.View):
     def __init__(self):
@@ -269,16 +338,13 @@ class TicketControlView(discord.ui.View):
         await interaction.channel.delete()
 
 # =========================================================
-# 8. UI: Link Button View
+# 9. UI: Link Button & Verify Views
 # =========================================================
 class LinkButtonView(discord.ui.View):
     def __init__(self, url: str, label: str):
         super().__init__(timeout=None)
         self.add_item(discord.ui.Button(label=label, style=discord.ButtonStyle.link, url=url, emoji="🎮"))
 
-# =========================================================
-# 9. UI: Verify Panel View
-# =========================================================
 class VerifyView(discord.ui.View):
     def __init__(self):
         super().__init__(timeout=None)
@@ -427,6 +493,7 @@ async def on_ready():
     bot.add_view(TicketPanelView())
     bot.add_view(TicketControlView())
     bot.add_view(VerifyView())
+    bot.add_view(ShopView())
     try:
         synced = await bot.tree.sync()
         print(f"Synced {len(synced)} slash command(s)")
@@ -434,13 +501,13 @@ async def on_ready():
         print(f"Sync error: {e}")
     print(f"Logged in as {bot.user}")
 
-# エラーハンドリング（管理者権限がない人がコマンドを打った時用）
+# エラーハンドリング
 @bot.tree.error
 async def on_app_command_error(interaction: discord.Interaction, error: app_commands.AppCommandError):
     if isinstance(error, app_commands.CheckFailure):
         await interaction.response.send_message("❌ You do not have permission to use this command. (Administrator only)", ephemeral=True)
 
-# === /roles (一般ユーザーも実行可能：Verifyロールを付与) ===
+# === /roles (一般ユーザーも実行可能) ===
 @bot.tree.command(name="roles", description="Get your verified role")
 async def roles_cmd(interaction: discord.Interaction):
     if interaction.user.id in blacklist:
@@ -459,10 +526,8 @@ async def roles_cmd(interaction: discord.Interaction):
     else:
         await interaction.response.send_message(f"❌ Role `{role_name}` not found. Please contact staff.", ephemeral=True)
 
-# === 以降、すべて管理者権限必須 (@app_commands.checks.has_permissions(administrator=True)) ===
-
+# === /balance (誰でも使える) ===
 @bot.tree.command(name="balance", description="Check your balance")
-@app_commands.checks.has_permissions(administrator=True)
 async def balance_cmd(interaction: discord.Interaction):
     coins = get_coins(interaction.user.id)
     spins = get_spins(interaction.user.id)
@@ -470,41 +535,23 @@ async def balance_cmd(interaction: discord.Interaction):
     embed.set_thumbnail(url=interaction.user.display_avatar.url)
     await interaction.response.send_message(embed=embed, ephemeral=True)
 
-@bot.tree.command(name="coin_shop", description="View the coin shop")
+# === ここから下はすべて管理者権限必須 ===
+
+@bot.tree.command(name="shop_setup", description="[ADMIN] Post the coin shop panel")
 @app_commands.checks.has_permissions(administrator=True)
-async def coin_shop_cmd(interaction: discord.Interaction):
-    embed = discord.Embed(title="🛒 Coin Shop", description="Exchange coins for rewards!", color=discord.Color.gold())
+async def shop_setup_cmd(interaction: discord.Interaction):
+    embed = discord.Embed(
+        title="🛒 Coin Shop",
+        description="Select an item from the dropdown below to purchase it with your Coins.",
+        color=discord.Color.gold()
+    )
     for key, item in coin_shop_items.items():
         embed.add_field(name=item["name"], value=f"`{item['price']}` Coins", inline=True)
-    await interaction.response.send_message(embed=embed, ephemeral=True)
-
-@bot.tree.command(name="exchange", description="Exchange coins for an item")
-@app_commands.describe(item="Item ID from the shop")
-@app_commands.checks.has_permissions(administrator=True)
-async def exchange_cmd(interaction: discord.Interaction, item: str):
-    user_id = interaction.user.id
-    if item not in coin_shop_items:
-        await interaction.response.send_message("❌ Invalid item.", ephemeral=True)
-        return
-    item_data = coin_shop_items[item]
-    price = item_data["price"]
-    if get_coins(user_id) < price:
-        await interaction.response.send_message(f"❌ Not enough coins! Need `{price - get_coins(user_id)}` more.", ephemeral=True)
-        return
-    user_coins[user_id] = get_coins(user_id) - price
     
-    if item_data["type"] == "key":
-        key = create_key(item_data.get("hours", 0))
-        dm_success = await send_key_dm(interaction.user, key, item_data["name"])
-        if dm_success:
-            await interaction.response.send_message(f"✅ Bought **{item_data['name']}**! Check DMs.", ephemeral=True)
-        else:
-            await interaction.response.send_message(f"✅ Bought **{item_data['name']}**! Here is your key:\n`{key}`", ephemeral=True)
-    elif item_data["type"] == "spin":
-        add_spins(user_id, 1)
-        await interaction.response.send_message(f"✅ Bought **{item_data['name']}**!", ephemeral=True)
+    await interaction.response.send_message("✅ Shop panel created!", ephemeral=True)
+    await interaction.channel.send(embed=embed, view=ShopView())
 
-@bot.tree.command(name="coin_config", description="Configure coin shop items")
+@bot.tree.command(name="coin_config", description="[ADMIN] Configure coin shop items")
 @app_commands.describe(item_id="ID", name="Name", price="Price", item_type="Type", hours="Duration (if key)")
 @app_commands.choices(item_type=[
     app_commands.Choice(name="Key", value="key"),
@@ -516,7 +563,7 @@ async def coin_config_cmd(interaction: discord.Interaction, item_id: str, name: 
     coin_shop_items[item_id] = {"name": name, "price": price, "type": item_type.value, "hours": hours}
     await interaction.response.send_message(f"✅ Configured `{item_id}`: {name} for {price} coins.", ephemeral=True)
 
-@bot.tree.command(name="addcoins", description="Add coins or spins to a user")
+@bot.tree.command(name="addcoins", description="[ADMIN] Add coins or spins to a user")
 @app_commands.describe(user="User", amount="Amount", currency="Type")
 @app_commands.choices(currency=[
     app_commands.Choice(name="Coins", value="coins"),
@@ -531,7 +578,7 @@ async def addcurrency_cmd(interaction: discord.Interaction, user: discord.User, 
         add_spins(user.id, amount)
         await interaction.response.send_message(f"✅ Added {amount} spins to {user.mention}.", ephemeral=True)
 
-@bot.tree.command(name="guess", description="Start a Guess the Number game")
+@bot.tree.command(name="guess", description="[ADMIN] Start a Guess the Number game")
 @app_commands.describe(number="Correct number", prize="Prize")
 @app_commands.checks.has_permissions(administrator=True)
 async def guess_cmd(interaction: discord.Interaction, number: int, prize: str):
@@ -549,20 +596,20 @@ async def guess_cmd(interaction: discord.Interaction, number: int, prize: str):
     await interaction.response.send_message("✅ Game started!", ephemeral=True)
     await channel.send(embed=embed)
 
-@bot.tree.command(name="verify_setup", description="Post verify panel")
+@bot.tree.command(name="verify_setup", description="[ADMIN] Post verify panel")
 @app_commands.checks.has_permissions(administrator=True)
 async def verify_setup(interaction: discord.Interaction):
     embed = discord.Embed(title="✅ Verification", description="Click to verify.", color=discord.Color.green())
     await interaction.response.send_message(embed=embed, view=VerifyView())
 
-@bot.tree.command(name="setchannel", description="Set log channel")
+@bot.tree.command(name="setchannel", description="[ADMIN] Set log channel")
 @app_commands.describe(channel="The channel")
 @app_commands.checks.has_permissions(administrator=True)
 async def setchannel_cmd(interaction: discord.Interaction, channel: discord.TextChannel):
     log_config["link_log_channel_id"] = channel.id
     await interaction.response.send_message(f"✅ Link logs set to {channel.mention}", ephemeral=True)
 
-@bot.tree.command(name="link", description="Send a link button")
+@bot.tree.command(name="link", description="[ADMIN] Send a link button")
 @app_commands.describe(url="URL", label="Button text")
 @app_commands.checks.has_permissions(administrator=True)
 async def link_cmd(interaction: discord.Interaction, url: str, label: str = "Game link"):
@@ -571,7 +618,7 @@ async def link_cmd(interaction: discord.Interaction, url: str, label: str = "Gam
     await interaction.response.send_message("✅ Sent!", ephemeral=True)
     await interaction.channel.send(embed=embed, view=view)
 
-@bot.tree.command(name="clear", description="Clear messages")
+@bot.tree.command(name="clear", description="[ADMIN] Clear messages")
 @app_commands.describe(amount="Amount")
 @app_commands.checks.has_permissions(administrator=True)
 async def clear_cmd(interaction: discord.Interaction, amount: int = 100):
@@ -583,14 +630,14 @@ async def clear_cmd(interaction: discord.Interaction, amount: int = 100):
     except:
         await interaction.followup.send("❌ Error deleting messages.", ephemeral=True)
 
-@bot.tree.command(name="text", description="Make bot say something")
+@bot.tree.command(name="text", description="[ADMIN] Make bot say something")
 @app_commands.describe(message="Message")
 @app_commands.checks.has_permissions(administrator=True)
 async def text_cmd(interaction: discord.Interaction, message: str):
     await interaction.response.send_message("✅ Sent!", ephemeral=True)
     await interaction.channel.send(message)
 
-@bot.tree.command(name="whitelist", description="Whitelist a user")
+@bot.tree.command(name="whitelist", description="[ADMIN] Whitelist a user")
 @app_commands.describe(user="User", days="Days (0 for Lifetime)")
 @app_commands.checks.has_permissions(administrator=True)
 async def whitelist_cmd(interaction: discord.Interaction, user: discord.User, days: int = 0):
@@ -600,28 +647,28 @@ async def whitelist_cmd(interaction: discord.Interaction, user: discord.User, da
     embed = discord.Embed(title="✅ Whitelisted!", description=f"Here is your **{duration_text} Key**:\n`{key}`", color=discord.Color.green())
     await interaction.response.send_message(embed=embed, ephemeral=True)
 
-@bot.tree.command(name="unwhitelist", description="Unwhitelist a user")
+@bot.tree.command(name="unwhitelist", description="[ADMIN] Unwhitelist a user")
 @app_commands.describe(user="User")
 @app_commands.checks.has_permissions(administrator=True)
 async def unwhitelist_cmd(interaction: discord.Interaction, user: discord.User):
     whitelist.discard(user.id)
     await interaction.response.send_message(f"✅ Removed {user.mention} from whitelist.", ephemeral=True)
 
-@bot.tree.command(name="blacklist", description="Blacklist a user")
+@bot.tree.command(name="blacklist", description="[ADMIN] Blacklist a user")
 @app_commands.describe(user="User")
 @app_commands.checks.has_permissions(administrator=True)
 async def blacklist_cmd(interaction: discord.Interaction, user: discord.User):
     blacklist.add(user.id); whitelist.discard(user.id)
     await interaction.response.send_message(f"🚫 {user.mention} blacklisted.", ephemeral=True)
 
-@bot.tree.command(name="unblacklist", description="Unblacklist a user")
+@bot.tree.command(name="unblacklist", description="[ADMIN] Unblacklist a user")
 @app_commands.describe(user="User")
 @app_commands.checks.has_permissions(administrator=True)
 async def unblacklist_cmd(interaction: discord.Interaction, user: discord.User):
     blacklist.discard(user.id)
     await interaction.response.send_message(f"🔓 {user.mention} removed from blacklist.", ephemeral=True)
 
-@bot.tree.command(name="set_roles", description="Set roles")
+@bot.tree.command(name="set_roles", description="[ADMIN] Set roles")
 @app_commands.describe(verified_role="Panel Get Role", verify_role="Verify Button", ticket_roles="Comma separated")
 @app_commands.checks.has_permissions(administrator=True)
 async def set_roles(interaction: discord.Interaction, verified_role: str = None, verify_role: str = None, ticket_roles: str = None):
@@ -630,10 +677,11 @@ async def set_roles(interaction: discord.Interaction, verified_role: str = None,
     if ticket_roles: role_config["ticket_access_roles"] = [r.strip() for r in ticket_roles.split(",")]
     await interaction.response.send_message("✅ Roles updated.", ephemeral=True)
 
-@bot.tree.command(name="spin_config", description="Configure spin odds")
-@app_commands.describe(win_chance="Win chance %", weight_1h="1h", weight_1d="1d", weight_1w="1w", weight_lt="lt")
+@bot.tree.command(name="spin_config", description="[ADMIN] Configure spin odds")
+@app_commands.describe(cooldown="Cooldown in seconds", win_chance="Win chance %", weight_1h="1h", weight_1d="1d", weight_1w="1w", weight_lt="lt")
 @app_commands.checks.has_permissions(administrator=True)
-async def spin_config_cmd(interaction: discord.Interaction, win_chance: int = None, weight_1h: int = None, weight_1d: int = None, weight_1w: int = None, weight_lt: int = None):
+async def spin_config_cmd(interaction: discord.Interaction, cooldown: int = None, win_chance: int = None, weight_1h: int = None, weight_1d: int = None, weight_1w: int = None, weight_lt: int = None):
+    if cooldown is not None: spin_config["cooldown_seconds"] = cooldown
     if win_chance is not None: spin_config["win_chance"] = max(0, min(100, win_chance))
     for p in spin_config["prizes"]:
         if p["name"] == "1 Hour Key" and weight_1h is not None: p["weight"] = weight_1h
@@ -642,10 +690,10 @@ async def spin_config_cmd(interaction: discord.Interaction, win_chance: int = No
         if p["name"] == "Lifetime Key" and weight_lt is not None: p["weight"] = weight_lt
     
     prize_list = "\n".join([f"- {p['name']}: `{p['weight']}`" for p in spin_config["prizes"]])
-    embed = discord.Embed(title="⚙️ Spin Settings Updated", description=f"Win Chance: `{spin_config['win_chance']}%`\n{prize_list}", color=discord.Color.green())
+    embed = discord.Embed(title="⚙️ Spin Settings Updated", description=f"Cooldown: `{spin_config['cooldown_seconds']}s`\nWin Chance: `{spin_config['win_chance']}%`\n{prize_list}", color=discord.Color.green())
     await interaction.response.send_message(embed=embed, ephemeral=True)
 
-@bot.tree.command(name="send_embed", description="Send custom embed")
+@bot.tree.command(name="send_embed", description="[ADMIN] Send custom embed")
 @app_commands.describe(title="Title", description="Description", color_hex="Hex", footer="Footer", image_url="Image")
 @app_commands.checks.has_permissions(administrator=True)
 async def send_embed(interaction: discord.Interaction, title: str, description: str, color_hex: str = "5865F2", footer: str = None, image_url: str = None):
@@ -657,19 +705,19 @@ async def send_embed(interaction: discord.Interaction, title: str, description: 
     await interaction.response.send_message("✅ Sent!", ephemeral=True)
     await interaction.channel.send(embed=embed)
 
-@bot.tree.command(name="spin_setup", description="Post spin panel")
+@bot.tree.command(name="spin_setup", description="[ADMIN] Post spin panel")
 @app_commands.checks.has_permissions(administrator=True)
 async def spin_setup(interaction: discord.Interaction):
-    embed = discord.Embed(title="🎰 Spin for Keys", description="Click below to use a Spin Ticket and win keys!", color=discord.Color.gold())
+    embed = discord.Embed(title="🎰 Spin for Keys", description="Click below to use your free spin or a Spin Ticket to win keys!", color=discord.Color.gold())
     await interaction.response.send_message(embed=embed, view=SpinView())
 
-@bot.tree.command(name="ticket_setup", description="Post ticket panel")
+@bot.tree.command(name="ticket_setup", description="[ADMIN] Post ticket panel")
 @app_commands.checks.has_permissions(administrator=True)
 async def ticket_setup(interaction: discord.Interaction):
     embed = discord.Embed(title="🎫 Support Tickets", description="Click to open a ticket.", color=discord.Color.blurple())
     await interaction.response.send_message(embed=embed, view=TicketPanelView())
 
-@bot.tree.command(name="generatekey", description="Generate key")
+@bot.tree.command(name="generatekey", description="[ADMIN] Generate key")
 @app_commands.describe(duration="Duration", custom_days="Custom days")
 @app_commands.choices(duration=[
     app_commands.Choice(name="1 Hour", value="1h"),
@@ -693,7 +741,7 @@ async def generatekey(interaction: discord.Interaction, duration: app_commands.C
     embed.add_field(name="Duration", value=text, inline=True)
     await interaction.response.send_message(embed=embed, ephemeral=True)
 
-@bot.tree.command(name="panel", description="Post main panel")
+@bot.tree.command(name="panel", description="[ADMIN] Post main panel")
 @app_commands.checks.has_permissions(administrator=True)
 async def panel(interaction: discord.Interaction):
     embed = discord.Embed(title="Panel Access", description="Win or buy a key to unlock.", color=discord.Color.blue())
