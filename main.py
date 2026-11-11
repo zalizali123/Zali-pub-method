@@ -33,18 +33,17 @@ keys_db = {}
 linked_users = {} 
 whitelist = set()   
 blacklist = set()   
-user_coins = {} # ユーザーのコイン残高 { user_id: int }
+user_coins = {} 
+user_spins = {} # ユーザーのスピン所持数 { user_id: int }
 
 spin_config = {
-    "cooldown_seconds": 60,
     "win_chance": 40,
     "prizes": [
         {"name": "1 Hour Key", "weight": 50, "hours": 1},
         {"name": "1 Day Key", "weight": 30, "hours": 24},
         {"name": "1 Week Key", "weight": 15, "hours": 168},
         {"name": "Lifetime Key", "weight": 5, "hours": 0}
-    ],
-    "last_spin_times": {}
+    ]
 }
 
 role_config = {
@@ -57,15 +56,15 @@ log_config = {
     "link_log_channel_id": None
 }
 
-# ゲームの状態管理
 guess_games = {}
 
-# コイン交換レート設定
-COIN_PRICES = {
-    "1h": 100,
-    "1d": 500,
-    "1w": 2000,
-    "lifetime": 10000
+# === コインショップの動的設定 ===
+coin_shop_items = {
+    "1h": {"name": "1 Hour Key", "price": 100, "type": "key", "hours": 1},
+    "1d": {"name": "1 Day Key", "price": 500, "type": "key", "hours": 24},
+    "1w": {"name": "1 Week Key", "price": 2000, "type": "key", "hours": 168},
+    "lifetime": {"name": "Lifetime Key", "price": 10000, "type": "key", "hours": 0},
+    "spin": {"name": "1x Spin Ticket", "price": 50, "type": "spin"}
 }
 
 # =========================================================
@@ -101,11 +100,11 @@ async def send_key_dm(user: discord.User, key: str, prize_name: str):
     except discord.Forbidden:
         return False
 
-def get_coins(user_id):
-    return user_coins.get(user_id, 0)
+def get_coins(user_id): return user_coins.get(user_id, 0)
+def add_coins(user_id, amount): user_coins[user_id] = get_coins(user_id) + amount
 
-def add_coins(user_id, amount):
-    user_coins[user_id] = get_coins(user_id) + amount
+def get_spins(user_id): return user_spins.get(user_id, 0)
+def add_spins(user_id, amount): user_spins[user_id] = get_spins(user_id) + amount
 
 # =========================================================
 # 5. UI: Modals
@@ -181,26 +180,22 @@ class SpinView(discord.ui.View):
             return
 
         user_id = interaction.user.id
-        now = datetime.now(timezone.utc)
         
-        if user_id in spin_config["last_spin_times"]:
-            last_time = spin_config["last_spin_times"][user_id]
-            elapsed = (now - last_time).total_seconds()
-            cd = spin_config["cooldown_seconds"]
-            if elapsed < cd:
-                remaining = int(cd - elapsed)
-                await interaction.response.send_message(f"⏳ Please wait `{remaining}` seconds.", ephemeral=True)
-                return
+        # スピン所持数を確認
+        spins = get_spins(user_id)
+        if spins <= 0:
+            await interaction.response.send_message("❌ You don't have any spin tickets! Buy one in the coin shop.", ephemeral=True)
+            return
 
-        spin_config["last_spin_times"][user_id] = now
-        
+        # スピンを1回消費
+        user_spins[user_id] = spins - 1
+
         button.disabled = True
         await interaction.response.edit_message(content="🎰 **Spinning...**", view=self)
         await asyncio.sleep(1.5)
         
         win_roll = random.randint(1, 100)
         if win_roll > spin_config["win_chance"]:
-            # ハズレでも少しコインを付与
             add_coins(user_id, 10)
             embed = discord.Embed(title="Spin Result", description="❌ **You didn't win this time.**\nBut you got `10 Coins` for trying!", color=discord.Color.red())
             await interaction.followup.send(embed=embed, ephemeral=True)
@@ -388,6 +383,7 @@ class PanelView(discord.ui.View):
         embed = discord.Embed(title="📊 Your Stats", color=discord.Color.blue())
         embed.add_field(name="Roblox Account", value=f"`{roblox_name}`", inline=False)
         embed.add_field(name="Coins", value=f"`{get_coins(interaction.user.id)}`", inline=True)
+        embed.add_field(name="Spins", value=f"`{get_spins(interaction.user.id)}`", inline=True)
         if user_key_info:
             key_code, data = user_key_info
             expiry_text = "Lifetime" if data["expires_at"] is None else data["expires_at"].strftime("%Y-%m-%d %H:%M UTC")
@@ -407,26 +403,20 @@ async def on_message(message):
 
     if message.channel.id in guess_games:
         game = guess_games[message.channel.id]
-        
         if not game["active"]:
             return
 
-        try:
-            guess = int(message.content.strip())
-        except ValueError:
-            return
+        try: guess = int(message.content.strip())
+        except ValueError: return
 
         if guess == game["number"]:
-            # 正解処理
             game["active"] = False
             game["winner"] = message.author.id
             
-            # ロック処理（@everyone の送信権限を剥奪）
             overwrites = message.channel.overwrites_for(message.guild.default_role)
             overwrites.send_messages = False
             await message.channel.set_permissions(message.guild.default_role, overwrite=overwrites)
             
-            # 景品処理
             prize_name = game["prize"]
             win_embed = discord.Embed(
                 title="🎉 We have a winner!",
@@ -448,22 +438,18 @@ async def on_message(message):
                 else:
                     win_embed.add_field(name="Your Key", value=f"Your DMs are closed, so here it is:\n`{key}`", inline=False)
             
-            # コインも景品として付与（例として100コイン）
             add_coins(message.author.id, 100)
             win_embed.add_field(name="Bonus", value="+100 Coins!", inline=False)
 
             await message.channel.send(embed=win_embed)
             
-            # ロック完了の埋め込みを送信
             lock_embed = discord.Embed(
                 title="🔒 Locked",
-                description="This game has ended and the channel is now locked. You can no longer send messages here.",
+                description="This game has ended and the channel is now locked.",
                 color=discord.Color.dark_gray()
             )
             await message.channel.send(embed=lock_embed)
-        
         else:
-            # ハズレ（ヒントなし）
             await message.add_reaction("❌")
 
     await bot.process_commands(message)
@@ -485,53 +471,14 @@ async def on_ready():
         print(f"Sync error: {e}")
     print(f"Logged in as {bot.user}")
 
-# === /guess (現在のチャンネルで開始 ＆ ロック解除) ===
-@bot.tree.command(name="guess", description="[ADMIN] Start a Guess the Number game in this channel")
-@app_commands.describe(
-    number="The correct number to guess",
-    prize="The prize (e.g., '1d', 'lifetime', '1000 Coins')"
-)
-@app_commands.checks.has_permissions(administrator=True)
-async def guess_cmd(interaction: discord.Interaction, number: int, prize: str):
-    channel = interaction.channel
-    
-    # 既存のゲームがあるか確認
-    if channel.id in guess_games and guess_games[channel.id]["active"]:
-        await interaction.response.send_message("❌ A game is already running in this channel.", ephemeral=True)
-        return
-        
-    guess_games[channel.id] = {
-        "number": number,
-        "prize": prize,
-        "active": True,
-        "winner": None
-    }
-    
-    # チャンネルのロックを解除（全員が送信できるようにする）
-    overwrites = channel.overwrites_for(interaction.guild.default_role)
-    overwrites.send_messages = True
-    await channel.set_permissions(interaction.guild.default_role, overwrite=overwrites)
-    
-    embed = discord.Embed(
-        title="🔢 Guess the Number!",
-        description=(
-            f"**Prize:** {prize}\n\n"
-            "Simply type a number in this channel to guess.\n"
-            "You can guess as many times as you want!\n"
-            "**No hints will be given.** Good luck!"
-        ),
-        color=discord.Color.blue()
-    )
-    await interaction.response.send_message("✅ Game started in this channel!", ephemeral=True)
-    await channel.send(embed=embed)
-
 # === /balance ===
-@bot.tree.command(name="balance", description="Check your coin balance")
+@bot.tree.command(name="balance", description="Check your coin and spin balance")
 async def balance_cmd(interaction: discord.Interaction):
     coins = get_coins(interaction.user.id)
+    spins = get_spins(interaction.user.id)
     embed = discord.Embed(
         title="💰 Your Balance",
-        description=f"You currently have **{coins}** Coins.",
+        description=f"**Coins:** `{coins}`\n**Spin Tickets:** `{spins}`",
         color=discord.Color.gold()
     )
     embed.set_thumbnail(url=interaction.user.display_avatar.url)
@@ -542,27 +489,25 @@ async def balance_cmd(interaction: discord.Interaction):
 async def coin_shop_cmd(interaction: discord.Interaction):
     embed = discord.Embed(
         title="🛒 Coin Shop",
-        description="Exchange your hard-earned coins for keys!\nUse `/exchange <key_type>` to redeem.",
+        description="Exchange your hard-earned coins for rewards!\nUse `/exchange` to redeem.",
         color=discord.Color.gold()
     )
-    embed.add_field(name="1 Hour Key", value=f"`{COIN_PRICES['1h']}` Coins", inline=True)
-    embed.add_field(name="1 Day Key", value=f"`{COIN_PRICES['1d']}` Coins", inline=True)
-    embed.add_field(name="1 Week Key", value=f"`{COIN_PRICES['1w']}` Coins", inline=True)
-    embed.add_field(name="Lifetime Key", value=f"`{COIN_PRICES['lifetime']}` Coins", inline=True)
+    for key, item in coin_shop_items.items():
+        embed.add_field(name=item["name"], value=f"`{item['price']}` Coins", inline=True)
     await interaction.response.send_message(embed=embed, ephemeral=True)
 
 # === /exchange ===
-@bot.tree.command(name="exchange", description="Exchange your coins for a key")
-@app_commands.describe(key_type="The type of key you want to buy")
-@app_commands.choices(key_type=[
-    app_commands.Choice(name="1 Hour Key (100 Coins)", value="1h"),
-    app_commands.Choice(name="1 Day Key (500 Coins)", value="1d"),
-    app_commands.Choice(name="1 Week Key (2000 Coins)", value="1w"),
-    app_commands.Choice(name="Lifetime Key (10000 Coins)", value="lifetime")
-])
-async def exchange_cmd(interaction: discord.Interaction, key_type: app_commands.Choice[str]):
+@bot.tree.command(name="exchange", description="Exchange your coins for an item")
+@app_commands.describe(item="The item you want to buy")
+async def exchange_cmd(interaction: discord.Interaction, item: str):
     user_id = interaction.user.id
-    price = COIN_PRICES[key_type.value]
+    
+    if item not in coin_shop_items:
+        await interaction.response.send_message("❌ Invalid item. Check `/coin_shop` for available items.", ephemeral=True)
+        return
+        
+    item_data = coin_shop_items[item]
+    price = item_data["price"]
     current_coins = get_coins(user_id)
     
     if current_coins < price:
@@ -572,229 +517,236 @@ async def exchange_cmd(interaction: discord.Interaction, key_type: app_commands.
     # コインを引く
     user_coins[user_id] = current_coins - price
     
-    # キーを生成
-    if key_type.value == "1h": hours = 1
-    elif key_type.value == "1d": hours = 24
-    elif key_type.value == "1w": hours = 168
-    else: hours = 0
-    
-    key = create_key(duration_hours=hours)
-    
-    # DMで送信
-    dm_success = await send_key_dm(interaction.user, key, f"{key_type.name} Key")
-    
-    if dm_success:
+    # アイテム付与
+    if item_data["type"] == "key":
+        hours = item_data.get("hours", 0)
+        key = create_key(duration_hours=hours)
+        dm_success = await send_key_dm(interaction.user, key, item_data["name"])
+        
+        if dm_success:
+            embed = discord.Embed(
+                title="✅ Exchange Successful!",
+                description=f"You bought **{item_data['name']}** for `{price}` Coins.\n**Please check your DMs** to get the key.",
+                color=discord.Color.green()
+            )
+            await interaction.response.send_message(embed=embed, ephemeral=True)
+        else:
+            embed = discord.Embed(
+                title="✅ Exchange Successful! (DM Failed)",
+                description=f"Your DMs are closed, here is your key:\n`{key}`",
+                color=discord.Color.green()
+            )
+            await interaction.response.send_message(embed=embed, ephemeral=True)
+            
+    elif item_data["type"] == "spin":
+        add_spins(user_id, 1)
         embed = discord.Embed(
             title="✅ Exchange Successful!",
-            description=f"You bought a **{key_type.name}** for `{price}` Coins.\n**Please check your DMs** to get the key.",
-            color=discord.Color.green()
-        )
-        await interaction.response.send_message(embed=embed, ephemeral=True)
-    else:
-        embed = discord.Embed(
-            title="✅ Exchange Successful! (DM Failed)",
-            description=f"Your DMs are closed, here is your key:\n`{key}`",
+            description=f"You bought **{item_data['name']}** for `{price}` Coins.\nYou can now use `/spin_setup` to view the spin panel!",
             color=discord.Color.green()
         )
         await interaction.response.send_message(embed=embed, ephemeral=True)
 
-# === /addcoins ===
-@bot.tree.command(name="addcoins", description="[ADMIN] Add coins to a user")
-@app_commands.describe(user="The user to give coins to", amount="Amount of coins")
+# === /coin_config ===
+@bot.tree.command(name="coin_config", description="[OWNER] Configure coin shop items")
+@app_commands.describe(
+    item_id="Unique ID for the item (e.g. '1h', 'spin', 'custom_role')",
+    name="Display name (e.g. '1 Hour Key')",
+    price="Price in coins",
+    item_type="Type of item",
+    hours="Duration in hours (if type is 'key', 0 for lifetime)"
+)
+@app_commands.choices(item_type=[
+    app_commands.Choice(name="Key", value="key"),
+    app_commands.Choice(name="Spin Ticket", value="spin"),
+    app_commands.Choice(name="Custom/Other", value="custom")
+])
 @app_commands.checks.has_permissions(administrator=True)
-async def addcoins_cmd(interaction: discord.Interaction, user: discord.User, amount: int):
-    add_coins(user.id, amount)
-    embed = discord.Embed(
-        title="💰 Coins Added",
-        description=f"Successfully added `{amount}` Coins to {user.mention}.\nNew balance: `{get_coins(user.id)}`",
-        color=discord.Color.green()
-    )
+async def coin_config_cmd(
+    interaction: discord.Interaction, 
+    item_id: str, 
+    name: str, 
+    price: int, 
+    item_type: app_commands.Choice[str],
+    hours: int = 0
+):
+    coin_shop_items[item_id] = {
+        "name": name,
+        "price": price,
+        "type": item_type.value,
+        "hours": hours
+    }
+    
+    embed = discord.Embed(title="⚙️ Shop Updated", color=discord.Color.green())
+    embed.add_field(name="Item ID", value=f"`{item_id}`", inline=True)
+    embed.add_field(name="Name", value=name, inline=True)
+    embed.add_field(name="Price", value=f"`{price}` Coins", inline=True)
+    embed.add_field(name="Type", value=item_type.name, inline=True)
+    if item_type.value == "key":
+        embed.add_field(name="Duration (Hours)", value=f"`{hours}`", inline=True)
+        
     await interaction.response.send_message(embed=embed, ephemeral=True)
+
+# === /addcoins ===
+@bot.tree.command(name="addcoins", description="[ADMIN] Add coins or spins to a user")
+@app_commands.describe(user="The user", amount="Amount to add", currency="Coins or Spins")
+@app_commands.choices(currency=[
+    app_commands.Choice(name="Coins", value="coins"),
+    app_commands.Choice(name="Spin Tickets", value="spins")
+])
+@app_commands.checks.has_permissions(administrator=True)
+async def addcurrency_cmd(interaction: discord.Interaction, user: discord.User, amount: int, currency: app_commands.Choice[str]):
+    if currency.value == "coins":
+        add_coins(user.id, amount)
+        embed = discord.Embed(title="💰 Coins Added", description=f"Added `{amount}` Coins to {user.mention}.", color=discord.Color.green())
+    else:
+        add_spins(user.id, amount)
+        embed = discord.Embed(title="🎰 Spins Added", description=f"Added `{amount}` Spin Tickets to {user.mention}.", color=discord.Color.green())
+    await interaction.response.send_message(embed=embed, ephemeral=True)
+
+# === /guess ===
+@bot.tree.command(name="guess", description="[ADMIN] Start a Guess the Number game")
+@app_commands.describe(number="The correct number", prize="The prize (e.g. '1d', 'lifetime')")
+@app_commands.checks.has_permissions(administrator=True)
+async def guess_cmd(interaction: discord.Interaction, number: int, prize: str):
+    channel = interaction.channel
+    
+    if channel.id in guess_games and guess_games[channel.id]["active"]:
+        await interaction.response.send_message("❌ A game is already running in this channel.", ephemeral=True)
+        return
+        
+    guess_games[channel.id] = {
+        "number": number, "prize": prize, "active": True, "winner": None
+    }
+    
+    overwrites = channel.overwrites_for(interaction.guild.default_role)
+    overwrites.send_messages = True
+    await channel.set_permissions(interaction.guild.default_role, overwrite=overwrites)
+    
+    embed = discord.Embed(
+        title="🔢 Guess the Number!",
+        description=f"**Prize:** {prize}\n\nType a number to guess. You can guess as many times as you want!\n**No hints will be given.** Good luck!",
+        color=discord.Color.blue()
+    )
+    await interaction.response.send_message("✅ Game started!", ephemeral=True)
+    await channel.send(embed=embed)
 
 # === /verify_setup ===
 @bot.tree.command(name="verify_setup", description="[ADMIN] Post the verify panel")
 @app_commands.checks.has_permissions(administrator=True)
 async def verify_setup(interaction: discord.Interaction):
-    embed = discord.Embed(
-        title="✅ Verification",
-        description="Click the button below to verify yourself and gain access to the server.",
-        color=discord.Color.green()
-    )
+    embed = discord.Embed(title="✅ Verification", description="Click to verify.", color=discord.Color.green())
     await interaction.response.send_message(embed=embed, view=VerifyView())
 
 # === /setchannel ===
-@bot.tree.command(name="setchannel", description="[OWNER] Set the channel to log user links")
-@app_commands.describe(channel="The channel to send link logs to")
+@bot.tree.command(name="setchannel", description="[OWNER] Set log channel")
+@app_commands.describe(channel="The channel")
 @app_commands.checks.has_permissions(administrator=True)
 async def setchannel_cmd(interaction: discord.Interaction, channel: discord.TextChannel):
     log_config["link_log_channel_id"] = channel.id
-    embed = discord.Embed(
-        title="⚙️ Log Channel Set",
-        description=f"Link logs will now be sent to {channel.mention}",
-        color=discord.Color.green()
-    )
-    await interaction.response.send_message(embed=embed, ephemeral=True)
+    await interaction.response.send_message(f"✅ Link logs set to {channel.mention}", ephemeral=True)
 
 # === /link ===
-@bot.tree.command(name="link", description="[ADMIN] Send a message with a clickable link button")
-@app_commands.describe(
-    url="The URL to link to", 
-    label="The text to display on the button (default: Game link)"
-)
+@bot.tree.command(name="link", description="[ADMIN] Send a link button")
+@app_commands.describe(url="URL", label="Button text")
 @app_commands.checks.has_permissions(administrator=True)
 async def link_cmd(interaction: discord.Interaction, url: str, label: str = "Game link"):
-    embed = discord.Embed(
-        description="Click the button below to join the game.",
-        color=discord.Color.dark_theme()
-    )
+    embed = discord.Embed(description="Click the button below.", color=discord.Color.dark_theme())
     view = LinkButtonView(url=url, label=label)
-    await interaction.response.send_message("✅ Link panel sent!", ephemeral=True)
+    await interaction.response.send_message("✅ Sent!", ephemeral=True)
     await interaction.channel.send(embed=embed, view=view)
 
 # === /clear ===
-@bot.tree.command(name="clear", description="Clear messages in the current channel")
-@app_commands.describe(amount="Number of messages to delete (default: 100)")
+@bot.tree.command(name="clear", description="Clear messages")
+@app_commands.describe(amount="Amount (default 100)")
 @app_commands.checks.has_permissions(manage_messages=True)
 async def clear_cmd(interaction: discord.Interaction, amount: int = 100):
-    if amount < 1:
-        await interaction.response.send_message("❌ Please specify a number greater than 0.", ephemeral=True)
-        return
-
+    if amount < 1: return
     await interaction.response.defer(ephemeral=True)
     try:
-        deleted_count = 0
-        while amount > 0:
-            to_delete = min(amount, 100)
-            deleted = await interaction.channel.purge(limit=to_delete)
-            deleted_count += len(deleted)
-            amount -= to_delete
-            if len(deleted) < to_delete:
-                break
-        embed = discord.Embed(title="🧹 Channel Cleared", description=f"Successfully deleted **{deleted_count}** messages.", color=discord.Color.green())
-        await interaction.followup.send(embed=embed, ephemeral=True)
-    except discord.Forbidden:
-        await interaction.followup.send("❌ I don't have permission to delete messages here.", ephemeral=True)
-    except Exception as e:
-        await interaction.followup.send(f"❌ An error occurred: {e}", ephemeral=True)
+        deleted = await interaction.channel.purge(limit=amount)
+        await interaction.followup.send(f"✅ Deleted {len(deleted)} messages.", ephemeral=True)
+    except:
+        await interaction.followup.send("❌ Error deleting messages.", ephemeral=True)
 
 # === /text ===
-@bot.tree.command(name="text", description="Make the bot say something as a normal message")
-@app_commands.describe(message="The message for the bot to send")
+@bot.tree.command(name="text", description="Make bot say something")
+@app_commands.describe(message="Message")
 async def text_cmd(interaction: discord.Interaction, message: str):
-    await interaction.response.send_message("✅ Message sent!", ephemeral=True)
+    await interaction.response.send_message("✅ Sent!", ephemeral=True)
     await interaction.channel.send(message)
 
 # === /whitelist ===
-@bot.tree.command(name="whitelist", description="[OWNER] Whitelist a user and give them a key with a specific duration")
-@app_commands.describe(user="The user to whitelist", days="Duration in days (0 or blank for Lifetime)")
+@bot.tree.command(name="whitelist", description="[OWNER] Whitelist a user")
+@app_commands.describe(user="User", days="Days (0 for Lifetime)")
 @app_commands.checks.has_permissions(administrator=True)
 async def whitelist_cmd(interaction: discord.Interaction, user: discord.User, days: int = 0):
-    whitelist.add(user.id)
-    blacklist.discard(user.id)
-    duration_hours = days * 24
-    key = create_key(duration_hours=duration_hours if days > 0 else 0)
-    if days == 0: duration_text = "Lifetime"
-    elif days == 1: duration_text = "1 Day"
-    else: duration_text = f"{days} Days"
-    embed = discord.Embed(
-        title="✅ You are Whitelisted!",
-        description=f"You have been whitelisted by {interaction.user.mention}.\n\nHere is your **{duration_text} Key**:\n`{key}`\n\n*You can now use this key to redeem and access the panel.*",
-        color=discord.Color.green()
-    )
-    if days == 0: embed.set_footer(text="This key will never expire.")
-    else: embed.set_footer(text=f"This key is valid for {days} day(s).")
+    whitelist.add(user.id); blacklist.discard(user.id)
+    key = create_key(duration_hours=(days*24) if days > 0 else 0)
+    duration_text = "Lifetime" if days == 0 else f"{days} Days"
+    embed = discord.Embed(title="✅ Whitelisted!", description=f"Here is your **{duration_text} Key**:\n`{key}`", color=discord.Color.green())
     await interaction.response.send_message(embed=embed, ephemeral=True)
 
 # === /unwhitelist ===
-@bot.tree.command(name="unwhitelist", description="[OWNER] Remove a user from the whitelist")
-@app_commands.describe(user="The user to remove from whitelist")
+@bot.tree.command(name="unwhitelist", description="[OWNER] Unwhitelist a user")
+@app_commands.describe(user="User")
 @app_commands.checks.has_permissions(administrator=True)
 async def unwhitelist_cmd(interaction: discord.Interaction, user: discord.User):
-    if user.id in whitelist:
-        whitelist.discard(user.id)
-        embed = discord.Embed(title="🗑️ User Unwhitelisted", description=f"{user.mention} has been removed from the whitelist.", color=discord.Color.orange())
-    else:
-        embed = discord.Embed(title="❌ Not Found", description=f"{user.mention} is not in the whitelist.", color=discord.Color.red())
-    await interaction.response.send_message(embed=embed, ephemeral=True)
+    whitelist.discard(user.id)
+    await interaction.response.send_message(f"✅ Removed {user.mention} from whitelist.", ephemeral=True)
 
 # === /blacklist ===
-@bot.tree.command(name="blacklist", description="[OWNER] Blacklist a user from using the bot")
-@app_commands.describe(user="The user to blacklist")
+@bot.tree.command(name="blacklist", description="[OWNER] Blacklist a user")
+@app_commands.describe(user="User")
 @app_commands.checks.has_permissions(administrator=True)
 async def blacklist_cmd(interaction: discord.Interaction, user: discord.User):
-    blacklist.add(user.id)
-    whitelist.discard(user.id)
-    embed = discord.Embed(title="🚫 User Blacklisted", description=f"{user.mention} has been blacklisted. They can no longer use the panel or commands.", color=discord.Color.red())
-    await interaction.response.send_message(embed=embed, ephemeral=True)
+    blacklist.add(user.id); whitelist.discard(user.id)
+    await interaction.response.send_message(f"🚫 {user.mention} blacklisted.", ephemeral=True)
 
 # === /unblacklist ===
-@bot.tree.command(name="unblacklist", description="[OWNER] Remove a user from the blacklist")
-@app_commands.describe(user="The user to remove from blacklist")
+@bot.tree.command(name="unblacklist", description="[OWNER] Unblacklist a user")
+@app_commands.describe(user="User")
 @app_commands.checks.has_permissions(administrator=True)
 async def unblacklist_cmd(interaction: discord.Interaction, user: discord.User):
-    if user.id in blacklist:
-        blacklist.discard(user.id)
-        embed = discord.Embed(title="🔓 User Unblacklisted", description=f"{user.mention} has been removed from the blacklist.", color=discord.Color.green())
-    else:
-        embed = discord.Embed(title="❌ Not Found", description=f"{user.mention} is not in the blacklist.", color=discord.Color.red())
-    await interaction.response.send_message(embed=embed, ephemeral=True)
+    blacklist.discard(user.id)
+    await interaction.response.send_message(f"🔓 {user.mention} removed from blacklist.", ephemeral=True)
 
 # === /set_roles ===
-@bot.tree.command(name="set_roles", description="[OWNER] Set the roles for verification and tickets")
-@app_commands.describe(
-    verified_role="Role name to give on 'Get Role'",
-    verify_role="Role name to give on 'Verify' button",
-    ticket_roles="Role names to mention in tickets (comma separated, e.g. Support, Admin, Mod)"
-)
+@bot.tree.command(name="set_roles", description="[OWNER] Set roles")
+@app_commands.describe(verified_role="Panel Get Role", verify_role="Verify Button", ticket_roles="Comma separated")
 @app_commands.checks.has_permissions(administrator=True)
 async def set_roles(interaction: discord.Interaction, verified_role: str = None, verify_role: str = None, ticket_roles: str = None):
     if verified_role: role_config["verified_role"] = verified_role
     if verify_role: role_config["verify_role"] = verify_role
     if ticket_roles: role_config["ticket_access_roles"] = [r.strip() for r in ticket_roles.split(",")]
-    
-    embed = discord.Embed(title="⚙️ Role Settings Updated", color=discord.Color.green())
-    embed.add_field(name="Verified Role (Panel)", value=f"`{role_config['verified_role']}`", inline=False)
-    embed.add_field(name="Verify Role (Verify Button)", value=f"`{role_config['verify_role']}`", inline=False)
-    roles_text = ", ".join([f"`{r}`" for r in role_config["ticket_access_roles"]])
-    embed.add_field(name="Ticket Access Roles", value=roles_text, inline=False)
-    await interaction.response.send_message(embed=embed, ephemeral=True)
+    await interaction.response.send_message("✅ Roles updated.", ephemeral=True)
 
 # === /spin_config ===
-@bot.tree.command(name="spin_config", description="[OWNER] Configure spin wheel settings and odds")
+@bot.tree.command(name="spin_config", description="[OWNER] Configure spin odds")
 @app_commands.describe(
-    cooldown="Cooldown in seconds", 
-    win_chance="Overall win chance (0-100%)", 
-    weight_1h="Weight for 1 Hour Key",
-    weight_1d="Weight for 1 Day Key",
-    weight_1w="Weight for 1 Week Key",
-    weight_lt="Weight for Lifetime Key"
+    win_chance="Overall win chance %", 
+    weight_1h="1h weight", weight_1d="1d weight", weight_1w="1w weight", weight_lt="lifetime weight"
 )
 @app_commands.checks.has_permissions(administrator=True)
-async def spin_config_cmd(interaction: discord.Interaction, cooldown: int = None, win_chance: int = None, weight_1h: int = None, weight_1d: int = None, weight_1w: int = None, weight_lt: int = None):
-    if cooldown is not None: spin_config["cooldown_seconds"] = cooldown
+async def spin_config_cmd(interaction: discord.Interaction, win_chance: int = None, weight_1h: int = None, weight_1d: int = None, weight_1w: int = None, weight_lt: int = None):
     if win_chance is not None: spin_config["win_chance"] = max(0, min(100, win_chance))
     for p in spin_config["prizes"]:
         if p["name"] == "1 Hour Key" and weight_1h is not None: p["weight"] = weight_1h
         if p["name"] == "1 Day Key" and weight_1d is not None: p["weight"] = weight_1d
         if p["name"] == "1 Week Key" and weight_1w is not None: p["weight"] = weight_1w
         if p["name"] == "Lifetime Key" and weight_lt is not None: p["weight"] = weight_lt
-    embed = discord.Embed(title="⚙️ Spin Settings Updated", color=discord.Color.green())
-    embed.add_field(name="Cooldown", value=f"`{spin_config['cooldown_seconds']}`s", inline=True)
-    embed.add_field(name="Win Chance", value=f"`{spin_config['win_chance']}`%", inline=True)
+    
     prize_list = "\n".join([f"- {p['name']}: `{p['weight']}`" for p in spin_config["prizes"]])
-    embed.add_field(name="Prize Weights", value=prize_list, inline=False)
+    embed = discord.Embed(title="⚙️ Spin Settings Updated", description=f"Win Chance: `{spin_config['win_chance']}%`\n{prize_list}", color=discord.Color.green())
     await interaction.response.send_message(embed=embed, ephemeral=True)
 
 # === /send_embed ===
-@bot.tree.command(name="send_embed", description="[OWNER] Send a customized embed")
-@app_commands.describe(title="Title", description="Description", color_hex="Hex color (e.g. ff0000)", footer="Footer", image_url="Image URL")
+@bot.tree.command(name="send_embed", description="[OWNER] Send custom embed")
+@app_commands.describe(title="Title", description="Description", color_hex="Hex color", footer="Footer", image_url="Image URL")
 @app_commands.checks.has_permissions(administrator=True)
 async def send_embed(interaction: discord.Interaction, title: str, description: str, color_hex: str = "5865F2", footer: str = None, image_url: str = None):
-    try:
-        color = discord.Color(int(color_hex.replace("#", ""), 16))
-    except ValueError:
-        await interaction.response.send_message("❌ Invalid HEX color.", ephemeral=True)
-        return
+    try: color = discord.Color(int(color_hex.replace("#", ""), 16))
+    except: color = discord.Color.blurple()
     embed = discord.Embed(title=title, description=description, color=color)
     if footer: embed.set_footer(text=footer)
     if image_url: embed.set_image(url=image_url)
@@ -802,59 +754,48 @@ async def send_embed(interaction: discord.Interaction, title: str, description: 
     await interaction.channel.send(embed=embed)
 
 # === /spin_setup ===
-@bot.tree.command(name="spin_setup", description="[ADMIN] Post the spin wheel panel")
+@bot.tree.command(name="spin_setup", description="[ADMIN] Post spin panel")
 @app_commands.checks.has_permissions(administrator=True)
 async def spin_setup(interaction: discord.Interaction):
-    embed = discord.Embed(title="🎰 Spin for Keys", description="Click below to spin and win free keys!\n\n**Prizes:**\n1 Hour, 1 Day, 1 Week, Lifetime", color=discord.Color.gold())
+    embed = discord.Embed(title="🎰 Spin for Keys", description="Click below to use a Spin Ticket and win keys!", color=discord.Color.gold())
     await interaction.response.send_message(embed=embed, view=SpinView())
 
 # === /ticket_setup ===
-@bot.tree.command(name="ticket_setup", description="[ADMIN] Post the ticket panel")
+@bot.tree.command(name="ticket_setup", description="[ADMIN] Post ticket panel")
 @app_commands.checks.has_permissions(administrator=True)
 async def ticket_setup(interaction: discord.Interaction):
-    embed = discord.Embed(title="🎫 Support Tickets", description="Need help? Click the button below to open a private ticket with our support team.", color=discord.Color.blurple())
+    embed = discord.Embed(title="🎫 Support Tickets", description="Click to open a ticket.", color=discord.Color.blurple())
     await interaction.response.send_message(embed=embed, view=TicketPanelView())
 
 # === /generatekey ===
-@bot.tree.command(name="generatekey", description="[ADMIN] Generate a key")
-@app_commands.describe(duration="Duration", custom_days="Custom days (if applicable)")
+@bot.tree.command(name="generatekey", description="[ADMIN] Generate key")
+@app_commands.describe(duration="Duration", custom_days="Custom days")
 @app_commands.choices(duration=[
     app_commands.Choice(name="1 Hour", value="1h"),
     app_commands.Choice(name="1 Day", value="1d"),
     app_commands.Choice(name="1 Week", value="1w"),
     app_commands.Choice(name="Lifetime", value="lifetime"),
-    app_commands.Choice(name="Custom (Use custom_days)", value="custom")
+    app_commands.Choice(name="Custom", value="custom")
 ])
 @app_commands.checks.has_permissions(administrator=True)
 async def generatekey(interaction: discord.Interaction, duration: app_commands.Choice[str], custom_days: int = None):
-    if duration.value == "lifetime":
-        key = create_key(duration_hours=0)
-        duration_text = "Lifetime"
-    elif duration.value == "1h":
-        key = create_key(duration_hours=1)
-        duration_text = "1 Hour"
-    elif duration.value == "1d":
-        key = create_key(duration_hours=24)
-        duration_text = "1 Day"
-    elif duration.value == "1w":
-        key = create_key(duration_hours=168)
-        duration_text = "1 Week"
+    if duration.value == "lifetime": key = create_key(0); text = "Lifetime"
+    elif duration.value == "1h": key = create_key(1); text = "1 Hour"
+    elif duration.value == "1d": key = create_key(24); text = "1 Day"
+    elif duration.value == "1w": key = create_key(168); text = "1 Week"
     elif duration.value == "custom":
-        if not custom_days or custom_days <= 0:
-            await interaction.response.send_message("❌ Please specify `custom_days` greater than 0.", ephemeral=True)
-            return
-        key = create_key(duration_hours=custom_days * 24)
-        duration_text = f"{custom_days} Days"
+        if not custom_days or custom_days <= 0: return
+        key = create_key(custom_days * 24); text = f"{custom_days} Days"
     
     embed = discord.Embed(title="🔑 Key Generated", color=discord.Color.green())
     embed.add_field(name="Key", value=f"`{key}`", inline=False)
-    embed.add_field(name="Duration", value=duration_text, inline=True)
+    embed.add_field(name="Duration", value=text, inline=True)
     await interaction.response.send_message(embed=embed, ephemeral=True)
 
 # === /panel ===
-@bot.tree.command(name="panel", description="Post the main access panel")
+@bot.tree.command(name="panel", description="Post main panel")
 async def panel(interaction: discord.Interaction):
-    embed = discord.Embed(title="Panel Access", description="Win or buy a key to unlock.\n`Win/Buy ➔ Redeem ➔ Link ➔ Access`", color=discord.Color.blue())
+    embed = discord.Embed(title="Panel Access", description="Win or buy a key to unlock.", color=discord.Color.blue())
     await interaction.response.send_message(embed=embed, view=PanelView())
 
 # =========================================================
