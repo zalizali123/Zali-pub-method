@@ -48,13 +48,17 @@ spin_config = {
 
 role_config = {
     "verified_role": "Verified",
-    "verify_role": "Verified", # 新規: Verifyボタンで付与するロール
+    "verify_role": "Verified", 
     "ticket_access_roles": ["Support Team"] 
 }
 
 log_config = {
     "link_log_channel_id": None
 }
+
+# ゲームの状態管理
+# { channel_id: {"number": int, "prize": str, "active": bool, "winner": int | None} }
+guess_games = {}
 
 # =========================================================
 # 3. Bot Setup
@@ -377,7 +381,69 @@ class PanelView(discord.ui.View):
         await interaction.response.send_message(embed=embed, ephemeral=True)
 
 # =========================================================
-# 11. Commands
+# 11. Events (Guess Game Logic)
+# =========================================================
+@bot.event
+async def on_message(message):
+    if message.author.bot:
+        return
+
+    # Guessゲームのチャンネルか確認
+    if message.channel.id in guess_games:
+        game = guess_games[message.channel.id]
+        
+        # すでに終了しているゲームなら無視
+        if not game["active"]:
+            return
+
+        # 数字かどうかチェック
+        try:
+            guess = int(message.content.strip())
+        except ValueError:
+            return # 数字以外は無視
+
+        if guess == game["number"]:
+            # 正解！
+            game["active"] = False
+            game["winner"] = message.author.id
+            
+            # ロック処理（@everyone の送信権限を剥奪）
+            overwrites = message.channel.overwrites_for(message.guild.default_role)
+            overwrites.send_messages = False
+            await message.channel.set_permissions(message.guild.default_role, overwrite=overwrites)
+            
+            # 景品処理
+            prize_name = game["prize"]
+            embed = discord.Embed(
+                title="🎉 We have a winner!",
+                description=f"{message.author.mention} guessed the correct number: **{game['number']}**\n\n**Prize:** {prize_name}\n\nThis channel is now locked.",
+                color=discord.Color.gold()
+            )
+            
+            if prize_name.lower() in ["1h", "1d", "1w", "lifetime"]:
+                if prize_name.lower() == "1h": hours = 1
+                elif prize_name.lower() == "1d": hours = 24
+                elif prize_name.lower() == "1w": hours = 168
+                else: hours = 0
+                
+                key = create_key(duration_hours=hours)
+                dm_success = await send_key_dm(message.author, key, f"{prize_name} Key")
+                
+                if dm_success:
+                    embed.add_field(name="Your Key", value="Check your DMs!", inline=False)
+                else:
+                    embed.add_field(name="Your Key", value=f"Your DMs are closed, so here it is:\n`{key}`", inline=False)
+
+            await message.channel.send(embed=embed)
+        
+        else:
+            # ハズレ（ヒントなし）
+            await message.add_reaction("❌")
+
+    await bot.process_commands(message)
+
+# =========================================================
+# 12. Slash Commands
 # =========================================================
 @bot.event
 async def on_ready():
@@ -393,7 +459,52 @@ async def on_ready():
         print(f"Sync error: {e}")
     print(f"Logged in as {bot.user}")
 
-# === /verify_setup コマンド (新規追加) ===
+# === /guess コマンド ===
+@bot.tree.command(name="guess", description="[ADMIN] Start a Guess the Number game in a new channel")
+@app_commands.describe(
+    number="The correct number to guess",
+    prize="The prize (e.g., '1d', 'lifetime', '1000 Coins')"
+)
+@app_commands.checks.has_permissions(administrator=True)
+async def guess_cmd(interaction: discord.Interaction, number: int, prize: str):
+    guild = interaction.guild
+    
+    channel_name = "guess-the-number"
+    existing = discord.utils.get(guild.channels, name=channel_name)
+    if existing:
+        await existing.delete()
+        
+    overwrites = {
+        guild.default_role: discord.PermissionOverwrite(read_messages=True, send_messages=True),
+        guild.me: discord.PermissionOverwrite(read_messages=True, send_messages=True)
+    }
+    
+    channel = await guild.create_text_channel(
+        name=channel_name,
+        overwrites=overwrites,
+        topic=f"Guess the number! Prize: {prize}"
+    )
+    
+    guess_games[channel.id] = {
+        "number": number,
+        "prize": prize,
+        "active": True,
+        "winner": None
+    }
+    
+    embed = discord.Embed(
+        title="🔢 Guess the Number!",
+        description=(
+            f"**Prize:** {prize}\n\n"
+            "Simply type a number in this channel to guess.\n"
+            "You can guess as many times as you want!\n"
+            "**No hints will be given.** Good luck!"
+        ),
+        color=discord.Color.blue()
+    )
+    await channel.send(embed=embed)
+    await interaction.response.send_message(f"✅ Game started in {channel.mention}", ephemeral=True)
+
 @bot.tree.command(name="verify_setup", description="[ADMIN] Post the verify panel")
 @app_commands.checks.has_permissions(administrator=True)
 async def verify_setup(interaction: discord.Interaction):
@@ -593,40 +704,4 @@ async def ticket_setup(interaction: discord.Interaction):
     app_commands.Choice(name="Lifetime", value="lifetime"),
     app_commands.Choice(name="Custom (Use custom_days)", value="custom")
 ])
-@app_commands.checks.has_permissions(administrator=True)
-async def generatekey(interaction: discord.Interaction, duration: app_commands.Choice[str], custom_days: int = None):
-    if duration.value == "lifetime":
-        key = create_key(duration_hours=0)
-        duration_text = "Lifetime"
-    elif duration.value == "1h":
-        key = create_key(duration_hours=1)
-        duration_text = "1 Hour"
-    elif duration.value == "1d":
-        key = create_key(duration_hours=24)
-        duration_text = "1 Day"
-    elif duration.value == "1w":
-        key = create_key(duration_hours=168)
-        duration_text = "1 Week"
-    elif duration.value == "custom":
-        if not custom_days or custom_days <= 0:
-            await interaction.response.send_message("❌ Please specify `custom_days` greater than 0.", ephemeral=True)
-            return
-        key = create_key(duration_hours=custom_days * 24)
-        duration_text = f"{custom_days} Days"
-    
-    embed = discord.Embed(title="🔑 Key Generated", color=discord.Color.green())
-    embed.add_field(name="Key", value=f"`{key}`", inline=False)
-    embed.add_field(name="Duration", value=duration_text, inline=True)
-    await interaction.response.send_message(embed=embed, ephemeral=True)
-
-@bot.tree.command(name="panel", description="Post the main access panel")
-async def panel(interaction: discord.Interaction):
-    embed = discord.Embed(title="Panel Access", description="Win or buy a key to unlock.\n`Win/Buy ➔ Redeem ➔ Link ➔ Access`", color=discord.Color.blue())
-    await interaction.response.send_message(embed=embed, view=PanelView())
-
-# =========================================================
-# 12. Start
-# =========================================================
-if __name__ == "__main__":
-    threading.Thread(target=run_dummy_server, daemon=True).start()
-    bot.run(os.environ["DISCORD_TOKEN"])
+@app
