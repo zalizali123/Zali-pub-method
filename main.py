@@ -11,7 +11,7 @@ from discord import app_commands
 from discord.ext import commands
 
 # =========================================================
-# 1. Dummy HTTP Server
+# 1. Dummy HTTP Server (For Render)
 # =========================================================
 class HealthCheckHandler(BaseHTTPRequestHandler):
     def do_GET(self):
@@ -57,7 +57,6 @@ log_config = {
 }
 
 # ゲームの状態管理
-# { channel_id: {"number": int, "prize": str, "active": bool, "winner": int | None} }
 guess_games = {}
 
 # =========================================================
@@ -388,31 +387,26 @@ async def on_message(message):
     if message.author.bot:
         return
 
-    # Guessゲームのチャンネルか確認
     if message.channel.id in guess_games:
         game = guess_games[message.channel.id]
         
-        # すでに終了しているゲームなら無視
         if not game["active"]:
             return
 
-        # 数字かどうかチェック
         try:
             guess = int(message.content.strip())
         except ValueError:
-            return # 数字以外は無視
+            return
 
         if guess == game["number"]:
-            # 正解！
             game["active"] = False
             game["winner"] = message.author.id
             
-            # ロック処理（@everyone の送信権限を剥奪）
+            # ロック処理
             overwrites = message.channel.overwrites_for(message.guild.default_role)
             overwrites.send_messages = False
             await message.channel.set_permissions(message.guild.default_role, overwrite=overwrites)
             
-            # 景品処理
             prize_name = game["prize"]
             embed = discord.Embed(
                 title="🎉 We have a winner!",
@@ -437,7 +431,6 @@ async def on_message(message):
             await message.channel.send(embed=embed)
         
         else:
-            # ハズレ（ヒントなし）
             await message.add_reaction("❌")
 
     await bot.process_commands(message)
@@ -459,7 +452,7 @@ async def on_ready():
         print(f"Sync error: {e}")
     print(f"Logged in as {bot.user}")
 
-# === /guess コマンド ===
+# === /guess ===
 @bot.tree.command(name="guess", description="[ADMIN] Start a Guess the Number game in a new channel")
 @app_commands.describe(
     number="The correct number to guess",
@@ -505,6 +498,7 @@ async def guess_cmd(interaction: discord.Interaction, number: int, prize: str):
     await channel.send(embed=embed)
     await interaction.response.send_message(f"✅ Game started in {channel.mention}", ephemeral=True)
 
+# === /verify_setup ===
 @bot.tree.command(name="verify_setup", description="[ADMIN] Post the verify panel")
 @app_commands.checks.has_permissions(administrator=True)
 async def verify_setup(interaction: discord.Interaction):
@@ -515,6 +509,7 @@ async def verify_setup(interaction: discord.Interaction):
     )
     await interaction.response.send_message(embed=embed, view=VerifyView())
 
+# === /setchannel ===
 @bot.tree.command(name="setchannel", description="[OWNER] Set the channel to log user links")
 @app_commands.describe(channel="The channel to send link logs to")
 @app_commands.checks.has_permissions(administrator=True)
@@ -527,6 +522,7 @@ async def setchannel_cmd(interaction: discord.Interaction, channel: discord.Text
     )
     await interaction.response.send_message(embed=embed, ephemeral=True)
 
+# === /link ===
 @bot.tree.command(name="link", description="[ADMIN] Send a message with a clickable link button")
 @app_commands.describe(
     url="The URL to link to", 
@@ -542,6 +538,7 @@ async def link_cmd(interaction: discord.Interaction, url: str, label: str = "Gam
     await interaction.response.send_message("✅ Link panel sent!", ephemeral=True)
     await interaction.channel.send(embed=embed, view=view)
 
+# === /clear ===
 @bot.tree.command(name="clear", description="Clear messages in the current channel")
 @app_commands.describe(amount="Number of messages to delete (default: 100)")
 @app_commands.checks.has_permissions(manage_messages=True)
@@ -567,12 +564,14 @@ async def clear_cmd(interaction: discord.Interaction, amount: int = 100):
     except Exception as e:
         await interaction.followup.send(f"❌ An error occurred: {e}", ephemeral=True)
 
+# === /text ===
 @bot.tree.command(name="text", description="Make the bot say something as a normal message")
 @app_commands.describe(message="The message for the bot to send")
 async def text_cmd(interaction: discord.Interaction, message: str):
     await interaction.response.send_message("✅ Message sent!", ephemeral=True)
     await interaction.channel.send(message)
 
+# === /whitelist ===
 @bot.tree.command(name="whitelist", description="[OWNER] Whitelist a user and give them a key with a specific duration")
 @app_commands.describe(user="The user to whitelist", days="Duration in days (0 or blank for Lifetime)")
 @app_commands.checks.has_permissions(administrator=True)
@@ -593,6 +592,7 @@ async def whitelist_cmd(interaction: discord.Interaction, user: discord.User, da
     else: embed.set_footer(text=f"This key is valid for {days} day(s).")
     await interaction.response.send_message(embed=embed, ephemeral=True)
 
+# === /unwhitelist ===
 @bot.tree.command(name="unwhitelist", description="[OWNER] Remove a user from the whitelist")
 @app_commands.describe(user="The user to remove from whitelist")
 @app_commands.checks.has_permissions(administrator=True)
@@ -604,6 +604,7 @@ async def unwhitelist_cmd(interaction: discord.Interaction, user: discord.User):
         embed = discord.Embed(title="❌ Not Found", description=f"{user.mention} is not in the whitelist.", color=discord.Color.red())
     await interaction.response.send_message(embed=embed, ephemeral=True)
 
+# === /blacklist ===
 @bot.tree.command(name="blacklist", description="[OWNER] Blacklist a user from using the bot")
 @app_commands.describe(user="The user to blacklist")
 @app_commands.checks.has_permissions(administrator=True)
@@ -613,6 +614,7 @@ async def blacklist_cmd(interaction: discord.Interaction, user: discord.User):
     embed = discord.Embed(title="🚫 User Blacklisted", description=f"{user.mention} has been blacklisted. They can no longer use the panel or commands.", color=discord.Color.red())
     await interaction.response.send_message(embed=embed, ephemeral=True)
 
+# === /unblacklist ===
 @bot.tree.command(name="unblacklist", description="[OWNER] Remove a user from the blacklist")
 @app_commands.describe(user="The user to remove from blacklist")
 @app_commands.checks.has_permissions(administrator=True)
@@ -624,6 +626,7 @@ async def unblacklist_cmd(interaction: discord.Interaction, user: discord.User):
         embed = discord.Embed(title="❌ Not Found", description=f"{user.mention} is not in the blacklist.", color=discord.Color.red())
     await interaction.response.send_message(embed=embed, ephemeral=True)
 
+# === /set_roles ===
 @bot.tree.command(name="set_roles", description="[OWNER] Set the roles for verification and tickets")
 @app_commands.describe(
     verified_role="Role name to give on 'Get Role'",
@@ -643,6 +646,7 @@ async def set_roles(interaction: discord.Interaction, verified_role: str = None,
     embed.add_field(name="Ticket Access Roles", value=roles_text, inline=False)
     await interaction.response.send_message(embed=embed, ephemeral=True)
 
+# === /spin_config ===
 @bot.tree.command(name="spin_config", description="[OWNER] Configure spin wheel settings and odds")
 @app_commands.describe(
     cooldown="Cooldown in seconds", 
@@ -668,6 +672,7 @@ async def spin_config_cmd(interaction: discord.Interaction, cooldown: int = None
     embed.add_field(name="Prize Weights", value=prize_list, inline=False)
     await interaction.response.send_message(embed=embed, ephemeral=True)
 
+# === /send_embed ===
 @bot.tree.command(name="send_embed", description="[OWNER] Send a customized embed")
 @app_commands.describe(title="Title", description="Description", color_hex="Hex color (e.g. ff0000)", footer="Footer", image_url="Image URL")
 @app_commands.checks.has_permissions(administrator=True)
@@ -683,18 +688,21 @@ async def send_embed(interaction: discord.Interaction, title: str, description: 
     await interaction.response.send_message("✅ Sent!", ephemeral=True)
     await interaction.channel.send(embed=embed)
 
+# === /spin_setup ===
 @bot.tree.command(name="spin_setup", description="[ADMIN] Post the spin wheel panel")
 @app_commands.checks.has_permissions(administrator=True)
 async def spin_setup(interaction: discord.Interaction):
     embed = discord.Embed(title="🎰 Spin for Keys", description="Click below to spin and win free keys!\n\n**Prizes:**\n1 Hour, 1 Day, 1 Week, Lifetime", color=discord.Color.gold())
     await interaction.response.send_message(embed=embed, view=SpinView())
 
+# === /ticket_setup ===
 @bot.tree.command(name="ticket_setup", description="[ADMIN] Post the ticket panel")
 @app_commands.checks.has_permissions(administrator=True)
 async def ticket_setup(interaction: discord.Interaction):
     embed = discord.Embed(title="🎫 Support Tickets", description="Need help? Click the button below to open a private ticket with our support team.", color=discord.Color.blurple())
     await interaction.response.send_message(embed=embed, view=TicketPanelView())
 
+# === /generatekey ===
 @bot.tree.command(name="generatekey", description="[ADMIN] Generate a key")
 @app_commands.describe(duration="Duration", custom_days="Custom days (if applicable)")
 @app_commands.choices(duration=[
@@ -704,4 +712,41 @@ async def ticket_setup(interaction: discord.Interaction):
     app_commands.Choice(name="Lifetime", value="lifetime"),
     app_commands.Choice(name="Custom (Use custom_days)", value="custom")
 ])
-@app
+@app_commands.checks.has_permissions(administrator=True)
+async def generatekey(interaction: discord.Interaction, duration: app_commands.Choice[str], custom_days: int = None):
+    if duration.value == "lifetime":
+        key = create_key(duration_hours=0)
+        duration_text = "Lifetime"
+    elif duration.value == "1h":
+        key = create_key(duration_hours=1)
+        duration_text = "1 Hour"
+    elif duration.value == "1d":
+        key = create_key(duration_hours=24)
+        duration_text = "1 Day"
+    elif duration.value == "1w":
+        key = create_key(duration_hours=168)
+        duration_text = "1 Week"
+    elif duration.value == "custom":
+        if not custom_days or custom_days <= 0:
+            await interaction.response.send_message("❌ Please specify `custom_days` greater than 0.", ephemeral=True)
+            return
+        key = create_key(duration_hours=custom_days * 24)
+        duration_text = f"{custom_days} Days"
+    
+    embed = discord.Embed(title="🔑 Key Generated", color=discord.Color.green())
+    embed.add_field(name="Key", value=f"`{key}`", inline=False)
+    embed.add_field(name="Duration", value=duration_text, inline=True)
+    await interaction.response.send_message(embed=embed, ephemeral=True)
+
+# === /panel ===
+@bot.tree.command(name="panel", description="Post the main access panel")
+async def panel(interaction: discord.Interaction):
+    embed = discord.Embed(title="Panel Access", description="Win or buy a key to unlock.\n`Win/Buy ➔ Redeem ➔ Link ➔ Access`", color=discord.Color.blue())
+    await interaction.response.send_message(embed=embed, view=PanelView())
+
+# =========================================================
+# 13. Start
+# =========================================================
+if __name__ == "__main__":
+    threading.Thread(target=run_dummy_server, daemon=True).start()
+    bot.run(os.environ["DISCORD_TOKEN"])
