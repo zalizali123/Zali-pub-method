@@ -57,6 +57,7 @@ log_config = {
 }
 
 # ゲームの状態管理
+# { channel_id: {"number": int, "prize": str, "active": bool, "winner": int | None} }
 guess_games = {}
 
 # =========================================================
@@ -399,18 +400,20 @@ async def on_message(message):
             return
 
         if guess == game["number"]:
+            # 正解処理
             game["active"] = False
             game["winner"] = message.author.id
             
-            # ロック処理
+            # ロック処理（@everyone の送信権限を剥奪）
             overwrites = message.channel.overwrites_for(message.guild.default_role)
             overwrites.send_messages = False
             await message.channel.set_permissions(message.guild.default_role, overwrite=overwrites)
             
+            # 景品処理
             prize_name = game["prize"]
-            embed = discord.Embed(
+            win_embed = discord.Embed(
                 title="🎉 We have a winner!",
-                description=f"{message.author.mention} guessed the correct number: **{game['number']}**\n\n**Prize:** {prize_name}\n\nThis channel is now locked.",
+                description=f"{message.author.mention} guessed the correct number: **{game['number']}**\n\n**Prize:** {prize_name}",
                 color=discord.Color.gold()
             )
             
@@ -424,13 +427,22 @@ async def on_message(message):
                 dm_success = await send_key_dm(message.author, key, f"{prize_name} Key")
                 
                 if dm_success:
-                    embed.add_field(name="Your Key", value="Check your DMs!", inline=False)
+                    win_embed.add_field(name="Your Key", value="Check your DMs!", inline=False)
                 else:
-                    embed.add_field(name="Your Key", value=f"Your DMs are closed, so here it is:\n`{key}`", inline=False)
+                    win_embed.add_field(name="Your Key", value=f"Your DMs are closed, so here it is:\n`{key}`", inline=False)
 
-            await message.channel.send(embed=embed)
+            await message.channel.send(embed=win_embed)
+            
+            # ロック完了の埋め込みを送信
+            lock_embed = discord.Embed(
+                title="🔒 Locked",
+                description="This game has ended and the channel is now locked. You can no longer send messages here.",
+                color=discord.Color.dark_gray()
+            )
+            await message.channel.send(embed=lock_embed)
         
         else:
+            # ハズレ（ヒントなし）
             await message.add_reaction("❌")
 
     await bot.process_commands(message)
@@ -452,32 +464,21 @@ async def on_ready():
         print(f"Sync error: {e}")
     print(f"Logged in as {bot.user}")
 
-# === /guess ===
-@bot.tree.command(name="guess", description="[ADMIN] Start a Guess the Number game in a new channel")
+# === /guess (現在のチャンネルで開始) ===
+@bot.tree.command(name="guess", description="[ADMIN] Start a Guess the Number game in this channel")
 @app_commands.describe(
     number="The correct number to guess",
     prize="The prize (e.g., '1d', 'lifetime', '1000 Coins')"
 )
 @app_commands.checks.has_permissions(administrator=True)
 async def guess_cmd(interaction: discord.Interaction, number: int, prize: str):
-    guild = interaction.guild
+    channel = interaction.channel
     
-    channel_name = "guess-the-number"
-    existing = discord.utils.get(guild.channels, name=channel_name)
-    if existing:
-        await existing.delete()
+    # 既存のゲームがあるか確認
+    if channel.id in guess_games and guess_games[channel.id]["active"]:
+        await interaction.response.send_message("❌ A game is already running in this channel.", ephemeral=True)
+        return
         
-    overwrites = {
-        guild.default_role: discord.PermissionOverwrite(read_messages=True, send_messages=True),
-        guild.me: discord.PermissionOverwrite(read_messages=True, send_messages=True)
-    }
-    
-    channel = await guild.create_text_channel(
-        name=channel_name,
-        overwrites=overwrites,
-        topic=f"Guess the number! Prize: {prize}"
-    )
-    
     guess_games[channel.id] = {
         "number": number,
         "prize": prize,
@@ -495,8 +496,8 @@ async def guess_cmd(interaction: discord.Interaction, number: int, prize: str):
         ),
         color=discord.Color.blue()
     )
+    await interaction.response.send_message("✅ Game started in this channel!", ephemeral=True)
     await channel.send(embed=embed)
-    await interaction.response.send_message(f"✅ Game started in {channel.mention}", ephemeral=True)
 
 # === /verify_setup ===
 @bot.tree.command(name="verify_setup", description="[ADMIN] Post the verify panel")
