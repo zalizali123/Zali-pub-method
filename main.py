@@ -37,7 +37,7 @@ user_coins = {}
 user_spins = {} 
 
 spin_config = {
-    "cooldown_seconds": 60, # 無料スピンのクールダウン
+    "cooldown_seconds": 60,
     "win_chance": 40,
     "prizes": [
         {"name": "1 Hour Key", "weight": 50, "hours": 1},
@@ -45,7 +45,7 @@ spin_config = {
         {"name": "1 Week Key", "weight": 15, "hours": 168},
         {"name": "Lifetime Key", "weight": 5, "hours": 0}
     ],
-    "last_spin_times": {} # クールダウン管理用
+    "last_spin_times": {}
 }
 
 role_config = {
@@ -166,8 +166,70 @@ class LinkUserModal(discord.ui.Modal, title="Link Roblox User"):
                 except discord.Forbidden:
                     pass
 
+class TicketModal(discord.ui.Modal, title="Open a Ticket"):
+    reason = discord.ui.TextInput(
+        label="Reason for contact",
+        style=discord.TextStyle.paragraph,
+        placeholder="Type 'mm' if you need a middleman, or describe your issue...",
+        required=True,
+        max_length=500
+    )
+
+    async def on_submit(self, interaction: discord.Interaction):
+        guild = interaction.guild
+        user = interaction.user
+        reason_text = self.reason.value
+        
+        access_role_names = role_config["ticket_access_roles"]
+        existing_channel = discord.utils.get(guild.channels, name=f"ticket-{user.name.lower()}")
+        if existing_channel:
+            await interaction.response.send_message(f"❌ You already have an open ticket: {existing_channel.mention}", ephemeral=True)
+            return
+
+        overwrites = {
+            guild.default_role: discord.PermissionOverwrite(read_messages=False),
+            user: discord.PermissionOverwrite(read_messages=True, send_messages=True),
+            guild.me: discord.PermissionOverwrite(read_messages=True, send_messages=True)
+        }
+
+        mention_list = []
+        for r_name in access_role_names:
+            role = discord.utils.get(guild.roles, name=r_name.strip())
+            if role:
+                overwrites[role] = discord.PermissionOverwrite(read_messages=True, send_messages=True)
+                mention_list.append(role.mention)
+        
+        mention_text = ", ".join(mention_list) if mention_list else "No roles configured."
+
+        ticket_channel = await guild.create_text_channel(
+            name=f"ticket-{user.name}",
+            overwrites=overwrites,
+            category=interaction.channel.category 
+        )
+        
+        # チケット作成完了の応答
+        await interaction.response.send_message(f"✅ Ticket created: {ticket_channel.mention}", ephemeral=True)
+
+        # Auto MM 判定
+        is_mm = "mm" in reason_text.lower() or "middleman" in reason_text.lower()
+        
+        if is_mm:
+            embed = discord.Embed(
+                title="🤝 Middleman Request",
+                description=f"Hello {user.mention}, your middleman request has been received.\n\n**Your Reason:**\n> {reason_text}\n\nPlease wait a moment while a staff member reviews this. If you can, please provide the following:\n- The other party's Discord/Username\n- What item/amount is being traded",
+                color=discord.Color.gold()
+            )
+        else:
+            embed = discord.Embed(
+                title="🎫 Support Ticket",
+                description=f"Hello {user.mention}, your ticket has been created.\n\n**Your Reason:**\n> {reason_text}\n\nA staff member will be with you shortly.",
+                color=discord.Color.green()
+            )
+
+        await ticket_channel.send(content=mention_text, embed=embed, view=TicketControlView())
+
 # =========================================================
-# 6. UI: Spin Game View (Cooldown + Tickets)
+# 6. UI: Spin Game View
 # =========================================================
 class SpinView(discord.ui.View):
     def __init__(self):
@@ -182,7 +244,6 @@ class SpinView(discord.ui.View):
         user_id = interaction.user.id
         now = datetime.now(timezone.utc)
         
-        # クールダウンとチケットの判定
         can_free_spin = False
         if user_id not in spin_config["last_spin_times"]:
             can_free_spin = True
@@ -193,10 +254,8 @@ class SpinView(discord.ui.View):
                 can_free_spin = True
 
         if can_free_spin:
-            # 無料スピンを実行
             spin_config["last_spin_times"][user_id] = now
         else:
-            # クールダウン中 -> チケットを消費
             spins = get_spins(user_id)
             if spins <= 0:
                 remaining = int(spin_config["cooldown_seconds"] - (now - spin_config["last_spin_times"][user_id]).total_seconds())
@@ -294,38 +353,8 @@ class TicketPanelView(discord.ui.View):
         if interaction.user.id in blacklist:
             await interaction.response.send_message("❌ You are blacklisted.", ephemeral=True)
             return
-
-        guild = interaction.guild
-        access_role_names = role_config["ticket_access_roles"]
-        existing_channel = discord.utils.get(guild.channels, name=f"ticket-{interaction.user.name.lower()}")
-        if existing_channel:
-            await interaction.response.send_message(f"❌ You already have an open ticket: {existing_channel.mention}", ephemeral=True)
-            return
-
-        overwrites = {
-            guild.default_role: discord.PermissionOverwrite(read_messages=False),
-            interaction.user: discord.PermissionOverwrite(read_messages=True, send_messages=True),
-            guild.me: discord.PermissionOverwrite(read_messages=True, send_messages=True)
-        }
-
-        mention_list = []
-        for r_name in access_role_names:
-            role = discord.utils.get(guild.roles, name=r_name.strip())
-            if role:
-                overwrites[role] = discord.PermissionOverwrite(read_messages=True, send_messages=True)
-                mention_list.append(role.mention)
-        
-        mention_text = ", ".join(mention_list) if mention_list else "No roles configured."
-
-        ticket_channel = await guild.create_text_channel(
-            name=f"ticket-{interaction.user.name}",
-            overwrites=overwrites,
-            category=interaction.channel.category 
-        )
-        
-        embed = discord.Embed(title="Ticket Created", description=f"Hello {interaction.user.mention},\nThank you for reaching out. A staff member will be with you shortly.\n\n{mention_text}, please assist this user.", color=discord.Color.green())
-        await ticket_channel.send(content=mention_text, embed=embed, view=TicketControlView())
-        await interaction.response.send_message(f"✅ Ticket created: {ticket_channel.mention}", ephemeral=True)
+        # モーダルを開く
+        await interaction.response.send_modal(TicketModal())
 
 class TicketControlView(discord.ui.View):
     def __init__(self):
