@@ -33,6 +33,7 @@ keys_db = {}
 linked_users = {} 
 whitelist = set()   
 blacklist = set()   
+user_coins = {} # ユーザーのコイン残高 { user_id: int }
 
 spin_config = {
     "cooldown_seconds": 60,
@@ -57,8 +58,15 @@ log_config = {
 }
 
 # ゲームの状態管理
-# { channel_id: {"number": int, "prize": str, "active": bool, "winner": int | None} }
 guess_games = {}
+
+# コイン交換レート設定
+COIN_PRICES = {
+    "1h": 100,
+    "1d": 500,
+    "1w": 2000,
+    "lifetime": 10000
+}
 
 # =========================================================
 # 3. Bot Setup
@@ -92,6 +100,12 @@ async def send_key_dm(user: discord.User, key: str, prize_name: str):
         return True
     except discord.Forbidden:
         return False
+
+def get_coins(user_id):
+    return user_coins.get(user_id, 0)
+
+def add_coins(user_id, amount):
+    user_coins[user_id] = get_coins(user_id) + amount
 
 # =========================================================
 # 5. UI: Modals
@@ -186,7 +200,9 @@ class SpinView(discord.ui.View):
         
         win_roll = random.randint(1, 100)
         if win_roll > spin_config["win_chance"]:
-            embed = discord.Embed(title="Spin Result", description="❌ **You didn't win this time.**", color=discord.Color.red())
+            # ハズレでも少しコインを付与
+            add_coins(user_id, 10)
+            embed = discord.Embed(title="Spin Result", description="❌ **You didn't win this time.**\nBut you got `10 Coins` for trying!", color=discord.Color.red())
             await interaction.followup.send(embed=embed, ephemeral=True)
         else:
             prizes = spin_config["prizes"]
@@ -371,6 +387,7 @@ class PanelView(discord.ui.View):
         roblox_name = linked_users.get(interaction.user.id, "Not linked")
         embed = discord.Embed(title="📊 Your Stats", color=discord.Color.blue())
         embed.add_field(name="Roblox Account", value=f"`{roblox_name}`", inline=False)
+        embed.add_field(name="Coins", value=f"`{get_coins(interaction.user.id)}`", inline=True)
         if user_key_info:
             key_code, data = user_key_info
             expiry_text = "Lifetime" if data["expires_at"] is None else data["expires_at"].strftime("%Y-%m-%d %H:%M UTC")
@@ -430,6 +447,10 @@ async def on_message(message):
                     win_embed.add_field(name="Your Key", value="Check your DMs!", inline=False)
                 else:
                     win_embed.add_field(name="Your Key", value=f"Your DMs are closed, so here it is:\n`{key}`", inline=False)
+            
+            # コインも景品として付与（例として100コイン）
+            add_coins(message.author.id, 100)
+            win_embed.add_field(name="Bonus", value="+100 Coins!", inline=False)
 
             await message.channel.send(embed=win_embed)
             
@@ -464,7 +485,7 @@ async def on_ready():
         print(f"Sync error: {e}")
     print(f"Logged in as {bot.user}")
 
-# === /guess (現在のチャンネルで開始) ===
+# === /guess (現在のチャンネルで開始 ＆ ロック解除) ===
 @bot.tree.command(name="guess", description="[ADMIN] Start a Guess the Number game in this channel")
 @app_commands.describe(
     number="The correct number to guess",
@@ -486,6 +507,11 @@ async def guess_cmd(interaction: discord.Interaction, number: int, prize: str):
         "winner": None
     }
     
+    # チャンネルのロックを解除（全員が送信できるようにする）
+    overwrites = channel.overwrites_for(interaction.guild.default_role)
+    overwrites.send_messages = True
+    await channel.set_permissions(interaction.guild.default_role, overwrite=overwrites)
+    
     embed = discord.Embed(
         title="🔢 Guess the Number!",
         description=(
@@ -498,6 +524,92 @@ async def guess_cmd(interaction: discord.Interaction, number: int, prize: str):
     )
     await interaction.response.send_message("✅ Game started in this channel!", ephemeral=True)
     await channel.send(embed=embed)
+
+# === /balance ===
+@bot.tree.command(name="balance", description="Check your coin balance")
+async def balance_cmd(interaction: discord.Interaction):
+    coins = get_coins(interaction.user.id)
+    embed = discord.Embed(
+        title="💰 Your Balance",
+        description=f"You currently have **{coins}** Coins.",
+        color=discord.Color.gold()
+    )
+    embed.set_thumbnail(url=interaction.user.display_avatar.url)
+    await interaction.response.send_message(embed=embed, ephemeral=True)
+
+# === /coin_shop ===
+@bot.tree.command(name="coin_shop", description="View the coin exchange shop")
+async def coin_shop_cmd(interaction: discord.Interaction):
+    embed = discord.Embed(
+        title="🛒 Coin Shop",
+        description="Exchange your hard-earned coins for keys!\nUse `/exchange <key_type>` to redeem.",
+        color=discord.Color.gold()
+    )
+    embed.add_field(name="1 Hour Key", value=f"`{COIN_PRICES['1h']}` Coins", inline=True)
+    embed.add_field(name="1 Day Key", value=f"`{COIN_PRICES['1d']}` Coins", inline=True)
+    embed.add_field(name="1 Week Key", value=f"`{COIN_PRICES['1w']}` Coins", inline=True)
+    embed.add_field(name="Lifetime Key", value=f"`{COIN_PRICES['lifetime']}` Coins", inline=True)
+    await interaction.response.send_message(embed=embed, ephemeral=True)
+
+# === /exchange ===
+@bot.tree.command(name="exchange", description="Exchange your coins for a key")
+@app_commands.describe(key_type="The type of key you want to buy")
+@app_commands.choices(key_type=[
+    app_commands.Choice(name="1 Hour Key (100 Coins)", value="1h"),
+    app_commands.Choice(name="1 Day Key (500 Coins)", value="1d"),
+    app_commands.Choice(name="1 Week Key (2000 Coins)", value="1w"),
+    app_commands.Choice(name="Lifetime Key (10000 Coins)", value="lifetime")
+])
+async def exchange_cmd(interaction: discord.Interaction, key_type: app_commands.Choice[str]):
+    user_id = interaction.user.id
+    price = COIN_PRICES[key_type.value]
+    current_coins = get_coins(user_id)
+    
+    if current_coins < price:
+        await interaction.response.send_message(f"❌ You don't have enough coins! You need `{price - current_coins}` more.", ephemeral=True)
+        return
+        
+    # コインを引く
+    user_coins[user_id] = current_coins - price
+    
+    # キーを生成
+    if key_type.value == "1h": hours = 1
+    elif key_type.value == "1d": hours = 24
+    elif key_type.value == "1w": hours = 168
+    else: hours = 0
+    
+    key = create_key(duration_hours=hours)
+    
+    # DMで送信
+    dm_success = await send_key_dm(interaction.user, key, f"{key_type.name} Key")
+    
+    if dm_success:
+        embed = discord.Embed(
+            title="✅ Exchange Successful!",
+            description=f"You bought a **{key_type.name}** for `{price}` Coins.\n**Please check your DMs** to get the key.",
+            color=discord.Color.green()
+        )
+        await interaction.response.send_message(embed=embed, ephemeral=True)
+    else:
+        embed = discord.Embed(
+            title="✅ Exchange Successful! (DM Failed)",
+            description=f"Your DMs are closed, here is your key:\n`{key}`",
+            color=discord.Color.green()
+        )
+        await interaction.response.send_message(embed=embed, ephemeral=True)
+
+# === /addcoins ===
+@bot.tree.command(name="addcoins", description="[ADMIN] Add coins to a user")
+@app_commands.describe(user="The user to give coins to", amount="Amount of coins")
+@app_commands.checks.has_permissions(administrator=True)
+async def addcoins_cmd(interaction: discord.Interaction, user: discord.User, amount: int):
+    add_coins(user.id, amount)
+    embed = discord.Embed(
+        title="💰 Coins Added",
+        description=f"Successfully added `{amount}` Coins to {user.mention}.\nNew balance: `{get_coins(user.id)}`",
+        color=discord.Color.green()
+    )
+    await interaction.response.send_message(embed=embed, ephemeral=True)
 
 # === /verify_setup ===
 @bot.tree.command(name="verify_setup", description="[ADMIN] Post the verify panel")
