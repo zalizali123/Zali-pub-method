@@ -170,7 +170,7 @@ class TicketModal(discord.ui.Modal, title="Open a Ticket"):
     reason = discord.ui.TextInput(
         label="Reason for contact",
         style=discord.TextStyle.paragraph,
-        placeholder="Type 'mm' if you need a middleman, or describe your issue...",
+        placeholder="Type 'mm' if you need a middleman, 'buy' for keys, or describe your issue...",
         required=True,
         max_length=500
     )
@@ -178,7 +178,7 @@ class TicketModal(discord.ui.Modal, title="Open a Ticket"):
     async def on_submit(self, interaction: discord.Interaction):
         guild = interaction.guild
         user = interaction.user
-        reason_text = self.reason.value
+        reason_text = self.reason.value.lower()
         
         access_role_names = role_config["ticket_access_roles"]
         existing_channel = discord.utils.get(guild.channels, name=f"ticket-{user.name.lower()}")
@@ -207,26 +207,47 @@ class TicketModal(discord.ui.Modal, title="Open a Ticket"):
             category=interaction.channel.category 
         )
         
-        # チケット作成完了の応答
         await interaction.response.send_message(f"✅ Ticket created: {ticket_channel.mention}", ephemeral=True)
 
-        # Auto MM 判定
-        is_mm = "mm" in reason_text.lower() or "middleman" in reason_text.lower()
+        # 最初の案内
+        embed = discord.Embed(
+            title="🎫 Ticket Created",
+            description=f"Hello {user.mention}, thank you for reaching out.\n\n**Your Reason:**\n> {self.reason.value}\n\nPlease wait while our automated system and staff review your request.",
+            color=discord.Color.green()
+        )
+        await ticket_channel.send(content=mention_text, embed=embed, view=TicketControlView())
+
+        # 自動対応ロジック
+        await asyncio.sleep(1) # 人間っぽく少し待つ
         
-        if is_mm:
-            embed = discord.Embed(
-                title="🤝 Middleman Request",
-                description=f"Hello {user.mention}, your middleman request has been received.\n\n**Your Reason:**\n> {reason_text}\n\nPlease wait a moment while a staff member reviews this. If you can, please provide the following:\n- The other party's Discord/Username\n- What item/amount is being traded",
-                color=discord.Color.gold()
+        if "mm" in reason_text or "middleman" in reason_text:
+            auto_reply = (
+                f"🤖 **Auto-Response:**\n"
+                f"It looks like you requested a **Middleman (MM)**.\n\n"
+                f"To help us assist you faster, please provide:\n"
+                f"1. The other party's Discord Username\n"
+                f"2. What item/amount is being traded\n"
+                f"3. Who goes first in the trade\n\n"
+                f"A staff member will be with you shortly to verify."
+            )
+        elif "buy" in reason_text or "key" in reason_text or "purchase" in reason_text:
+            auto_reply = (
+                f"🤖 **Auto-Response:**\n"
+                f"You are looking to **purchase a key or item**.\n\n"
+                f"Please check our shop panel for prices. If you have already paid or need to use crypto/PayPal, please state your payment method and a staff member will assist you."
+            )
+        elif "help" in reason_text or "issue" in reason_text or "problem" in reason_text:
+            auto_reply = (
+                f"🤖 **Auto-Response:**\n"
+                f"We see you need help with an issue. Please provide as much detail as possible, including screenshots if available. Staff will be with you shortly."
             )
         else:
-            embed = discord.Embed(
-                title="🎫 Support Ticket",
-                description=f"Hello {user.mention}, your ticket has been created.\n\n**Your Reason:**\n> {reason_text}\n\nA staff member will be with you shortly.",
-                color=discord.Color.green()
+            auto_reply = (
+                f"🤖 **Auto-Response:**\n"
+                f"Thank you for the information. A human staff member will review your ticket and reply as soon as possible."
             )
-
-        await ticket_channel.send(content=mention_text, embed=embed, view=TicketControlView())
+            
+        await ticket_channel.send(auto_reply)
 
 # =========================================================
 # 6. UI: Spin Game View
@@ -336,10 +357,19 @@ class ShopSelect(discord.ui.Select):
         elif item_data["type"] == "custom":
             await interaction.response.send_message(f"✅ Bought **{item_data['name']}**! Please contact staff to claim it.", ephemeral=True)
 
+class ShopBuyButton(discord.ui.Button):
+    def __init__(self):
+        super().__init__(label="Buy Item", style=discord.ButtonStyle.success, emoji="🛒", custom_id="btn_shop_buy")
+
+    async def callback(self, interaction: discord.Interaction):
+        view = discord.ui.View()
+        view.add_item(ShopSelect())
+        await interaction.response.send_message("Please select the item you want to buy:", view=view, ephemeral=True)
+
 class ShopView(discord.ui.View):
     def __init__(self):
         super().__init__(timeout=None)
-        self.add_item(ShopSelect())
+        self.add_item(ShopBuyButton())
 
 # =========================================================
 # 8. UI: Ticket System Views
@@ -353,7 +383,6 @@ class TicketPanelView(discord.ui.View):
         if interaction.user.id in blacklist:
             await interaction.response.send_message("❌ You are blacklisted.", ephemeral=True)
             return
-        # モーダルを開く
         await interaction.response.send_modal(TicketModal())
 
 class TicketControlView(discord.ui.View):
@@ -571,7 +600,7 @@ async def balance_cmd(interaction: discord.Interaction):
 async def shop_setup_cmd(interaction: discord.Interaction):
     embed = discord.Embed(
         title="🛒 Coin Shop",
-        description="Select an item from the dropdown below to purchase it with your Coins.",
+        description="Click the button below to open the shop and purchase items with your Coins.",
         color=discord.Color.gold()
     )
     for key, item in coin_shop_items.items():
