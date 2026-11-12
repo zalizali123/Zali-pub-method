@@ -265,7 +265,6 @@ class SpinView(discord.ui.View):
     async def check_spins(self, interaction: discord.Interaction, button: discord.ui.Button):
         user_id = interaction.user.id
         spins = get_spins(user_id)
-        
         now = datetime.now(timezone.utc)
         cd_status = "✅ Ready (Free Spin available!)"
         if user_id in spin_config["last_spin_times"]:
@@ -273,7 +272,6 @@ class SpinView(discord.ui.View):
             if elapsed < spin_config["cooldown_seconds"]:
                 remaining = int(spin_config["cooldown_seconds"] - elapsed)
                 cd_status = f"⏳ Cooldown: `{remaining}s` remaining"
-                
         embed = discord.Embed(title="🎰 Your Spin Status", color=discord.Color.blue())
         embed.add_field(name="Spin Tickets", value=f"`{spins}`", inline=True)
         embed.add_field(name="Free Spin", value=cd_status, inline=False)
@@ -345,7 +343,6 @@ class InviteExchangeSelect(discord.ui.Select):
             await interaction.response.send_message(f"❌ You don't have enough invites! You need `{req_invites - current_invites}` more.", ephemeral=True)
             return
             
-        # 招待数を消費
         user_invites[user_id] = current_invites - req_invites
         key = create_key(duration_hours=item["hours"])
         dm_success = await send_key_dm(interaction.user, key, item["name"])
@@ -530,7 +527,6 @@ async def on_message(message):
 
 @bot.event
 async def on_member_join(member):
-    # 招待数のカウント
     try:
         invites = await member.guild.invites()
         for invite in invites:
@@ -552,7 +548,6 @@ async def on_ready():
     bot.add_view(ShopView())
     bot.add_view(InviteExchangeView())
     
-    # 招待の初期キャッシュ
     for guild in bot.guilds:
         try:
             invites = await guild.invites()
@@ -636,7 +631,7 @@ async def shop_setup_cmd(interaction: discord.Interaction):
 @bot.tree.command(name="invite_setup", description="[ADMIN] Post invite panel")
 @app_commands.checks.has_permissions(administrator=True)
 async def invite_setup_cmd(interaction: discord.Interaction):
-    embed = discord.Embed(title="🎁 Invite Rewards", description="Exchange your invites for free keys!", color=discord.Color.gold())
+    embed = discord.Embed(title="🎁 Invite Rewards", description="Exchange your invites for free keys!\n\nClick the buttons below to check your invites or exchange them.", color=discord.Color.gold())
     for item in invite_shop_items:
         embed.add_field(name=item["name"], value=f"Requires `{item['invites']}` Invites", inline=True)
     await interaction.response.send_message("✅ Invite panel created!", ephemeral=True)
@@ -658,7 +653,6 @@ async def coin_config_cmd(interaction: discord.Interaction, item_id: str, name: 
 @app_commands.describe(invite_count="Required invites", name="Prize name", hours="Key duration hours (0 for lifetime)")
 @app_commands.checks.has_permissions(administrator=True)
 async def invite_config_cmd(interaction: discord.Interaction, invite_count: int, name: str, hours: int = 0):
-    # 上書きまたは追加
     for i, item in enumerate(invite_shop_items):
         if item["invites"] == invite_count:
             invite_shop_items[i] = {"invites": invite_count, "name": name, "hours": hours}
@@ -668,7 +662,7 @@ async def invite_config_cmd(interaction: discord.Interaction, invite_count: int,
     invite_shop_items.sort(key=lambda x: x["invites"])
     await interaction.response.send_message(f"✅ Added new reward: `{invite_count}` invites for **{name}**", ephemeral=True)
 
-@bot.tree.command(name="addcoins", description="[ADMIN] Add coins/spins")
+@bot.tree.command(name="addcoins", description="[ADMIN] Add coins/spins/invites")
 @app_commands.describe(user="User", amount="Amount", currency="Type")
 @app_commands.choices(currency=[
     app_commands.Choice(name="Coins", value="coins"),
