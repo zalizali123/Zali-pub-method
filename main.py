@@ -29,7 +29,7 @@ def run_dummy_server():
 # =========================================================
 # 2. In-Memory Database & Settings
 # =========================================================
-keys_db = {}
+keys_db = {} # { "KEY": {"expires_at": datetime, "used_by": None, "duration_seconds": int} }
 linked_users = {} 
 whitelist = set()   
 blacklist = set()   
@@ -55,7 +55,7 @@ role_config = {
 }
 
 log_config = {
-    "link_log_channel_id": None
+    "log_channel_id": None # LinkとRedeem両方のログ用
 }
 
 guess_games = {}
@@ -79,14 +79,22 @@ bot = commands.Bot(command_prefix="!", intents=intents)
 # =========================================================
 # 4. Helper Functions
 # =========================================================
-def create_key(duration_hours=None):
+def create_key(duration_hours=None, duration_seconds=None):
     chars = string.ascii_uppercase + string.digits
     new_key = ''.join(random.choices(chars, k=16))
     now = datetime.now(timezone.utc)
     expires_at = None
-    if duration_hours and duration_hours > 0:
+    
+    if duration_seconds:
+        expires_at = now + timedelta(seconds=duration_seconds)
+    elif duration_hours and duration_hours > 0:
         expires_at = now + timedelta(hours=duration_hours)
-    keys_db[new_key] = {"expires_at": expires_at, "used_by": None}
+        
+    keys_db[new_key] = {
+        "expires_at": expires_at, 
+        "used_by": None,
+        "duration_seconds": duration_seconds if duration_seconds else (duration_hours * 3600 if duration_hours else 0)
+    }
     return new_key
 
 async def send_key_dm(user: discord.User, key: str, prize_name: str):
@@ -100,6 +108,15 @@ async def send_key_dm(user: discord.User, key: str, prize_name: str):
         return True
     except discord.Forbidden:
         return False
+
+async def send_log(guild: discord.Guild, embed: discord.Embed):
+    if log_config["log_channel_id"]:
+        channel = guild.get_channel(log_config["log_channel_id"])
+        if channel:
+            try:
+                await channel.send(embed=embed)
+            except:
+                pass
 
 def get_coins(user_id): return user_coins.get(user_id, 0)
 def add_coins(user_id, amount): user_coins[user_id] = get_coins(user_id) + amount
@@ -136,8 +153,24 @@ class RedeemModal(discord.ui.Modal, title="Redeem Key"):
             await interaction.response.send_message("❌ This key has expired.", ephemeral=True)
             return
 
+        # キーを使用済みにする
         keys_db[key]["used_by"] = interaction.user.id
         await interaction.response.send_message("✅ Key successfully redeemed!", ephemeral=True)
+        
+        # ログ送信
+        duration_sec = key_data.get("duration_seconds", 0)
+        if duration_sec > 0:
+            duration_text = f"{duration_sec} 秒" if duration_sec < 60 else f"{duration_sec // 60} 分" if duration_sec < 3600 else f"{duration_sec // 3600} 時間"
+        else:
+            duration_text = "Lifetime (永久)"
+            
+        log_embed = discord.Embed(title="🔑 Key Redeemed", color=discord.Color.green())
+        log_embed.add_field(name="User", value=f"{interaction.user.mention} (`{interaction.user.id}`)", inline=False)
+        log_embed.add_field(name="Key", value=f"`{key}`", inline=True)
+        log_embed.add_field(name="Duration", value=duration_text, inline=True)
+        log_embed.set_thumbnail(url=interaction.user.display_avatar.url)
+        log_embed.timestamp = datetime.now(timezone.utc)
+        await send_log(interaction.guild, log_embed)
 
 class LinkUserModal(discord.ui.Modal, title="Link Roblox User"):
     username_input = discord.ui.TextInput(label="Roblox ID / Username", style=discord.TextStyle.short, required=True)
@@ -152,19 +185,13 @@ class LinkUserModal(discord.ui.Modal, title="Link Roblox User"):
         
         await interaction.response.send_message(f"✅ Linked to Roblox: `{roblox_id}`", ephemeral=True)
         
-        log_channel_id = log_config.get("link_log_channel_id")
-        if log_channel_id:
-            log_channel = interaction.guild.get_channel(log_channel_id)
-            if log_channel:
-                embed = discord.Embed(title="🔗 New User Linked", color=discord.Color.blue())
-                embed.add_field(name="Discord User", value=f"{interaction.user.mention} (`{interaction.user.id}`)", inline=False)
-                embed.add_field(name="Roblox ID", value=f"`{roblox_id}`", inline=True)
-                embed.set_thumbnail(url=interaction.user.display_avatar.url)
-                embed.timestamp = datetime.now(timezone.utc)
-                try:
-                    await log_channel.send(embed=embed)
-                except discord.Forbidden:
-                    pass
+        # ログ送信
+        log_embed = discord.Embed(title="🔗 New User Linked", color=discord.Color.blue())
+        log_embed.add_field(name="Discord User", value=f"{interaction.user.mention} (`{interaction.user.id}`)", inline=False)
+        log_embed.add_field(name="Roblox ID", value=f"`{roblox_id}`", inline=True)
+        log_embed.set_thumbnail(url=interaction.user.display_avatar.url)
+        log_embed.timestamp = datetime.now(timezone.utc)
+        await send_log(interaction.guild, log_embed)
 
 class TicketModal(discord.ui.Modal, title="Open a Ticket"):
     reason = discord.ui.TextInput(
@@ -209,7 +236,6 @@ class TicketModal(discord.ui.Modal, title="Open a Ticket"):
         
         await interaction.response.send_message(f"✅ Ticket created: {ticket_channel.mention}", ephemeral=True)
 
-        # 最初の案内
         embed = discord.Embed(
             title="🎫 Ticket Created",
             description=f"Hello {user.mention}, thank you for reaching out.\n\n**Your Reason:**\n> {self.reason.value}\n\nPlease wait while our automated system and staff review your request.",
@@ -217,35 +243,16 @@ class TicketModal(discord.ui.Modal, title="Open a Ticket"):
         )
         await ticket_channel.send(content=mention_text, embed=embed, view=TicketControlView())
 
-        # 自動対応ロジック
-        await asyncio.sleep(1) # 人間っぽく少し待つ
+        await asyncio.sleep(1) 
         
         if "mm" in reason_text or "middleman" in reason_text:
-            auto_reply = (
-                f"🤖 **Auto-Response:**\n"
-                f"It looks like you requested a **Middleman (MM)**.\n\n"
-                f"To help us assist you faster, please provide:\n"
-                f"1. The other party's Discord Username\n"
-                f"2. What item/amount is being traded\n"
-                f"3. Who goes first in the trade\n\n"
-                f"A staff member will be with you shortly to verify."
-            )
+            auto_reply = "🤖 **Auto-Response:**\nIt looks like you requested a **Middleman (MM)**.\n\nTo help us assist you faster, please provide:\n1. The other party's Discord Username\n2. What item/amount is being traded\n3. Who goes first in the trade\n\nA staff member will be with you shortly to verify."
         elif "buy" in reason_text or "key" in reason_text or "purchase" in reason_text:
-            auto_reply = (
-                f"🤖 **Auto-Response:**\n"
-                f"You are looking to **purchase a key or item**.\n\n"
-                f"Please check our shop panel for prices. If you have already paid or need to use crypto/PayPal, please state your payment method and a staff member will assist you."
-            )
+            auto_reply = "🤖 **Auto-Response:**\nYou are looking to **purchase a key or item**.\n\nPlease check our shop panel for prices. If you have already paid or need to use crypto/PayPal, please state your payment method and a staff member will assist you."
         elif "help" in reason_text or "issue" in reason_text or "problem" in reason_text:
-            auto_reply = (
-                f"🤖 **Auto-Response:**\n"
-                f"We see you need help with an issue. Please provide as much detail as possible, including screenshots if available. Staff will be with you shortly."
-            )
+            auto_reply = "🤖 **Auto-Response:**\nWe see you need help with an issue. Please provide as much detail as possible, including screenshots if available. Staff will be with you shortly."
         else:
-            auto_reply = (
-                f"🤖 **Auto-Response:**\n"
-                f"Thank you for the information. A human staff member will review your ticket and reply as soon as possible."
-            )
+            auto_reply = "🤖 **Auto-Response:**\nThank you for the information. A human staff member will review your ticket and reply as soon as possible."
             
         await ticket_channel.send(auto_reply)
 
@@ -559,32 +566,29 @@ async def on_ready():
         print(f"Sync error: {e}")
     print(f"Logged in as {bot.user}")
 
-# エラーハンドリング
 @bot.tree.error
 async def on_app_command_error(interaction: discord.Interaction, error: app_commands.AppCommandError):
     if isinstance(error, app_commands.CheckFailure):
         await interaction.response.send_message("❌ You do not have permission to use this command. (Administrator only)", ephemeral=True)
 
-# === /roles (一般ユーザーも実行可能) ===
+# === /roles (一般ユーザー) ===
 @bot.tree.command(name="roles", description="Get your verified role")
 async def roles_cmd(interaction: discord.Interaction):
     if interaction.user.id in blacklist:
         await interaction.response.send_message("❌ You are blacklisted.", ephemeral=True)
         return
-
     role_name = role_config["verify_role"]
     role = discord.utils.get(interaction.guild.roles, name=role_name)
-    
     if role:
         try:
             await interaction.user.add_roles(role)
             await interaction.response.send_message(f"✅ Gave you the `{role_name}` role!", ephemeral=True)
         except discord.Forbidden:
-            await interaction.response.send_message("❌ I don't have permission to give you this role.", ephemeral=True)
+            await interaction.response.send_message("❌ I don't have permission.", ephemeral=True)
     else:
-        await interaction.response.send_message(f"❌ Role `{role_name}` not found. Please contact staff.", ephemeral=True)
+        await interaction.response.send_message(f"❌ Role `{role_name}` not found.", ephemeral=True)
 
-# === /balance (誰でも使える) ===
+# === /balance (一般ユーザー) ===
 @bot.tree.command(name="balance", description="Check your balance")
 async def balance_cmd(interaction: discord.Interaction):
     coins = get_coins(interaction.user.id)
@@ -593,35 +597,30 @@ async def balance_cmd(interaction: discord.Interaction):
     embed.set_thumbnail(url=interaction.user.display_avatar.url)
     await interaction.response.send_message(embed=embed, ephemeral=True)
 
-# === ここから下はすべて管理者権限必須 ===
+# === 管理者用コマンド ===
 
-@bot.tree.command(name="shop_setup", description="[ADMIN] Post the coin shop panel")
+@bot.tree.command(name="shop_setup", description="[ADMIN] Post shop panel")
 @app_commands.checks.has_permissions(administrator=True)
 async def shop_setup_cmd(interaction: discord.Interaction):
-    embed = discord.Embed(
-        title="🛒 Coin Shop",
-        description="Click the button below to open the shop and purchase items with your Coins.",
-        color=discord.Color.gold()
-    )
+    embed = discord.Embed(title="🛒 Coin Shop", description="Click the button below to open the shop.", color=discord.Color.gold())
     for key, item in coin_shop_items.items():
         embed.add_field(name=item["name"], value=f"`{item['price']}` Coins", inline=True)
-    
-    await interaction.response.send_message("✅ Shop panel created!", ephemeral=True)
+    await interaction.response.send_message("✅ Shop created!", ephemeral=True)
     await interaction.channel.send(embed=embed, view=ShopView())
 
-@bot.tree.command(name="coin_config", description="[ADMIN] Configure coin shop items")
+@bot.tree.command(name="coin_config", description="[ADMIN] Configure shop items")
 @app_commands.describe(item_id="ID", name="Name", price="Price", item_type="Type", hours="Duration (if key)")
 @app_commands.choices(item_type=[
     app_commands.Choice(name="Key", value="key"),
     app_commands.Choice(name="Spin Ticket", value="spin"),
-    app_commands.Choice(name="Custom/Other", value="custom")
+    app_commands.Choice(name="Custom", value="custom")
 ])
 @app_commands.checks.has_permissions(administrator=True)
 async def coin_config_cmd(interaction: discord.Interaction, item_id: str, name: str, price: int, item_type: app_commands.Choice[str], hours: int = 0):
     coin_shop_items[item_id] = {"name": name, "price": price, "type": item_type.value, "hours": hours}
-    await interaction.response.send_message(f"✅ Configured `{item_id}`: {name} for {price} coins.", ephemeral=True)
+    await interaction.response.send_message(f"✅ Configured `{item_id}`.", ephemeral=True)
 
-@bot.tree.command(name="addcoins", description="[ADMIN] Add coins or spins to a user")
+@bot.tree.command(name="addcoins", description="[ADMIN] Add coins/spins")
 @app_commands.describe(user="User", amount="Amount", currency="Type")
 @app_commands.choices(currency=[
     app_commands.Choice(name="Coins", value="coins"),
@@ -636,7 +635,7 @@ async def addcurrency_cmd(interaction: discord.Interaction, user: discord.User, 
         add_spins(user.id, amount)
         await interaction.response.send_message(f"✅ Added {amount} spins to {user.mention}.", ephemeral=True)
 
-@bot.tree.command(name="guess", description="[ADMIN] Start a Guess the Number game")
+@bot.tree.command(name="guess", description="[ADMIN] Start guess game")
 @app_commands.describe(number="Correct number", prize="Prize")
 @app_commands.checks.has_permissions(administrator=True)
 async def guess_cmd(interaction: discord.Interaction, number: int, prize: str):
@@ -645,11 +644,9 @@ async def guess_cmd(interaction: discord.Interaction, number: int, prize: str):
         await interaction.response.send_message("❌ Game already running.", ephemeral=True)
         return
     guess_games[channel.id] = {"number": number, "prize": prize, "active": True, "winner": None}
-    
     overwrites = channel.overwrites_for(interaction.guild.default_role)
     overwrites.send_messages = True
     await channel.set_permissions(interaction.guild.default_role, overwrite=overwrites)
-    
     embed = discord.Embed(title="🔢 Guess the Number!", description=f"**Prize:** {prize}\n\nType a number to guess!", color=discord.Color.blue())
     await interaction.response.send_message("✅ Game started!", ephemeral=True)
     await channel.send(embed=embed)
@@ -664,10 +661,10 @@ async def verify_setup(interaction: discord.Interaction):
 @app_commands.describe(channel="The channel")
 @app_commands.checks.has_permissions(administrator=True)
 async def setchannel_cmd(interaction: discord.Interaction, channel: discord.TextChannel):
-    log_config["link_log_channel_id"] = channel.id
-    await interaction.response.send_message(f"✅ Link logs set to {channel.mention}", ephemeral=True)
+    log_config["log_channel_id"] = channel.id
+    await interaction.response.send_message(f"✅ Logs will be sent to {channel.mention}", ephemeral=True)
 
-@bot.tree.command(name="link", description="[ADMIN] Send a link button")
+@bot.tree.command(name="link", description="[ADMIN] Send link button")
 @app_commands.describe(url="URL", label="Button text")
 @app_commands.checks.has_permissions(administrator=True)
 async def link_cmd(interaction: discord.Interaction, url: str, label: str = "Game link"):
@@ -696,12 +693,12 @@ async def text_cmd(interaction: discord.Interaction, message: str):
     await interaction.channel.send(message)
 
 @bot.tree.command(name="whitelist", description="[ADMIN] Whitelist a user")
-@app_commands.describe(user="User", days="Days (0 for Lifetime)")
+@app_commands.describe(user="User", seconds="Duration in seconds (0 for Lifetime)")
 @app_commands.checks.has_permissions(administrator=True)
-async def whitelist_cmd(interaction: discord.Interaction, user: discord.User, days: int = 0):
+async def whitelist_cmd(interaction: discord.Interaction, user: discord.User, seconds: int = 0):
     whitelist.add(user.id); blacklist.discard(user.id)
-    key = create_key(duration_hours=(days*24) if days > 0 else 0)
-    duration_text = "Lifetime" if days == 0 else f"{days} Days"
+    key = create_key(duration_seconds=seconds if seconds > 0 else None)
+    duration_text = f"{seconds} Seconds" if seconds > 0 else "Lifetime"
     embed = discord.Embed(title="✅ Whitelisted!", description=f"Here is your **{duration_text} Key**:\n`{key}`", color=discord.Color.green())
     await interaction.response.send_message(embed=embed, ephemeral=True)
 
@@ -735,8 +732,8 @@ async def set_roles(interaction: discord.Interaction, verified_role: str = None,
     if ticket_roles: role_config["ticket_access_roles"] = [r.strip() for r in ticket_roles.split(",")]
     await interaction.response.send_message("✅ Roles updated.", ephemeral=True)
 
-@bot.tree.command(name="spin_config", description="[ADMIN] Configure spin odds")
-@app_commands.describe(cooldown="Cooldown in seconds", win_chance="Win chance %", weight_1h="1h", weight_1d="1d", weight_1w="1w", weight_lt="lt")
+@bot.tree.command(name="spin_config", description="[ADMIN] Configure spin")
+@app_commands.describe(cooldown="Cooldown sec", win_chance="Win %", weight_1h="1h", weight_1d="1d", weight_1w="1w", weight_lt="lt")
 @app_commands.checks.has_permissions(administrator=True)
 async def spin_config_cmd(interaction: discord.Interaction, cooldown: int = None, win_chance: int = None, weight_1h: int = None, weight_1d: int = None, weight_1w: int = None, weight_lt: int = None):
     if cooldown is not None: spin_config["cooldown_seconds"] = cooldown
@@ -746,7 +743,6 @@ async def spin_config_cmd(interaction: discord.Interaction, cooldown: int = None
         if p["name"] == "1 Day Key" and weight_1d is not None: p["weight"] = weight_1d
         if p["name"] == "1 Week Key" and weight_1w is not None: p["weight"] = weight_1w
         if p["name"] == "Lifetime Key" and weight_lt is not None: p["weight"] = weight_lt
-    
     prize_list = "\n".join([f"- {p['name']}: `{p['weight']}`" for p in spin_config["prizes"]])
     embed = discord.Embed(title="⚙️ Spin Settings Updated", description=f"Cooldown: `{spin_config['cooldown_seconds']}s`\nWin Chance: `{spin_config['win_chance']}%`\n{prize_list}", color=discord.Color.green())
     await interaction.response.send_message(embed=embed, ephemeral=True)
@@ -766,7 +762,7 @@ async def send_embed(interaction: discord.Interaction, title: str, description: 
 @bot.tree.command(name="spin_setup", description="[ADMIN] Post spin panel")
 @app_commands.checks.has_permissions(administrator=True)
 async def spin_setup(interaction: discord.Interaction):
-    embed = discord.Embed(title="🎰 Spin for Keys", description="Click below to use your free spin or a Spin Ticket to win keys!", color=discord.Color.gold())
+    embed = discord.Embed(title="🎰 Spin for Keys", description="Click below to spin!", color=discord.Color.gold())
     await interaction.response.send_message(embed=embed, view=SpinView())
 
 @bot.tree.command(name="ticket_setup", description="[ADMIN] Post ticket panel")
@@ -776,23 +772,23 @@ async def ticket_setup(interaction: discord.Interaction):
     await interaction.response.send_message(embed=embed, view=TicketPanelView())
 
 @bot.tree.command(name="generatekey", description="[ADMIN] Generate key")
-@app_commands.describe(duration="Duration", custom_days="Custom days")
+@app_commands.describe(duration="Duration", custom_seconds="Custom seconds")
 @app_commands.choices(duration=[
     app_commands.Choice(name="1 Hour", value="1h"),
     app_commands.Choice(name="1 Day", value="1d"),
     app_commands.Choice(name="1 Week", value="1w"),
     app_commands.Choice(name="Lifetime", value="lifetime"),
-    app_commands.Choice(name="Custom", value="custom")
+    app_commands.Choice(name="Custom (Use custom_seconds)", value="custom")
 ])
 @app_commands.checks.has_permissions(administrator=True)
-async def generatekey(interaction: discord.Interaction, duration: app_commands.Choice[str], custom_days: int = None):
-    if duration.value == "lifetime": key = create_key(0); text = "Lifetime"
-    elif duration.value == "1h": key = create_key(1); text = "1 Hour"
-    elif duration.value == "1d": key = create_key(24); text = "1 Day"
-    elif duration.value == "1w": key = create_key(168); text = "1 Week"
+async def generatekey(interaction: discord.Interaction, duration: app_commands.Choice[str], custom_seconds: int = None):
+    if duration.value == "lifetime": key = create_key(); text = "Lifetime"
+    elif duration.value == "1h": key = create_key(duration_hours=1); text = "1 Hour"
+    elif duration.value == "1d": key = create_key(duration_hours=24); text = "1 Day"
+    elif duration.value == "1w": key = create_key(duration_hours=168); text = "1 Week"
     elif duration.value == "custom":
-        if not custom_days or custom_days <= 0: return
-        key = create_key(custom_days * 24); text = f"{custom_days} Days"
+        if not custom_seconds or custom_seconds <= 0: return
+        key = create_key(duration_seconds=custom_seconds); text = f"{custom_seconds} Seconds"
     
     embed = discord.Embed(title="🔑 Key Generated", color=discord.Color.green())
     embed.add_field(name="Key", value=f"`{key}`", inline=False)
