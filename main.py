@@ -61,13 +61,9 @@ role_config = {
 log_config = {"log_channel_id": None}
 guess_games = {}
 
-coin_shop_items = {
-    "1h": {"name": "1 Hour Key", "price": 100, "type": "key", "hours": 1},
-    "1d": {"name": "1 Day Key", "price": 500, "type": "key", "hours": 24},
-    "1w": {"name": "1 Week Key", "price": 2000, "type": "key", "hours": 168},
-    "lifetime": {"name": "Lifetime Key", "price": 10000, "type": "key", "hours": 0},
-    "spin": {"name": "1x Spin Ticket", "price": 50, "type": "spin"}
-}
+# ショップのアイテム (初期は空)
+# { "item_id": {"name": str, "price": int, "type": "key"|"spin"|"role"|"custom", "hours": int, "role_id": int, "image_url": str} }
+coin_shop_items = {}
 
 invite_shop_items = [
     {"invites": 5, "name": "1 Hour Key", "hours": 1},
@@ -119,7 +115,7 @@ def add_spins(user_id, amount): user_spins[user_id] = get_spins(user_id) + amoun
 def get_invites(user_id): return user_invites.get(user_id, 0)
 
 # =========================================================
-# 5. UI: Views & Modals
+# 5. UI: Modals
 # =========================================================
 class RedeemModal(discord.ui.Modal, title="Redeem Key"):
     key_input = discord.ui.TextInput(label="Access Key (16 characters)", style=discord.TextStyle.short, placeholder="Paste your key here...", min_length=16, max_length=16, required=True)
@@ -214,6 +210,9 @@ class TicketModal(discord.ui.Modal, title="Open a Ticket"):
             auto_reply = "🤖 **Auto-Response:**\nThank you for the information. A human staff member will review your ticket and reply as soon as possible."
         await ticket_channel.send(auto_reply)
 
+# =========================================================
+# 6. UI: Spin Game View
+# =========================================================
 class SpinView(discord.ui.View):
     def __init__(self):
         super().__init__(timeout=None)
@@ -277,12 +276,22 @@ class SpinView(discord.ui.View):
         embed.add_field(name="Free Spin", value=cd_status, inline=False)
         await interaction.response.send_message(embed=embed, ephemeral=True)
 
+# =========================================================
+# 7. UI: Shop System Views
+# =========================================================
 class ShopSelect(discord.ui.Select):
     def __init__(self):
         options = [discord.SelectOption(label=item["name"], description=f"Price: {item['price']} Coins", value=key) for key, item in coin_shop_items.items()]
+        if not options:
+            options = [discord.SelectOption(label="No items available", value="none")]
+            
         super().__init__(placeholder="Select an item to buy...", min_values=1, max_values=1, options=options)
 
     async def callback(self, interaction: discord.Interaction):
+        if self.values[0] == "none":
+            await interaction.response.send_message("The shop is currently empty.", ephemeral=True)
+            return
+            
         if interaction.user.id in blacklist: return
         item_id = self.values[0]
         item_data = coin_shop_items[item_id]
@@ -292,14 +301,31 @@ class ShopSelect(discord.ui.Select):
             await interaction.response.send_message(f"❌ Not enough coins! Need `{price - get_coins(user_id)}` more.", ephemeral=True)
             return
         user_coins[user_id] = get_coins(user_id) - price
+        
         if item_data["type"] == "key":
             key = create_key(item_data.get("hours", 0))
             dm_success = await send_key_dm(interaction.user, key, item_data["name"])
             if dm_success: await interaction.response.send_message(f"✅ Bought **{item_data['name']}**! Check DMs.", ephemeral=True)
             else: await interaction.response.send_message(f"✅ Bought **{item_data['name']}**! Key:\n`{key}`", ephemeral=True)
+            
         elif item_data["type"] == "spin":
             add_spins(user_id, 1)
             await interaction.response.send_message(f"✅ Bought **{item_data['name']}**!", ephemeral=True)
+            
+        elif item_data["type"] == "role":
+            role_id = item_data.get("role_id")
+            role = interaction.guild.get_role(role_id)
+            if role:
+                try:
+                    await interaction.user.add_roles(role)
+                    await interaction.response.send_message(f"✅ Bought **{item_data['name']}**! Role given.", ephemeral=True)
+                except discord.Forbidden:
+                    await interaction.response.send_message(f"✅ Bought **{item_data['name']}**! But I don't have permission to give the role. Please contact staff.", ephemeral=True)
+            else:
+                await interaction.response.send_message(f"✅ Bought **{item_data['name']}**! But the role was deleted. Please contact staff.", ephemeral=True)
+                
+        elif item_data["type"] == "custom":
+            await interaction.response.send_message(f"✅ Bought **{item_data['name']}**! Please open a ticket to claim your reward.", ephemeral=True)
 
 class ShopBuyButton(discord.ui.Button):
     def __init__(self):
@@ -315,6 +341,9 @@ class ShopView(discord.ui.View):
         super().__init__(timeout=None)
         self.add_item(ShopBuyButton())
 
+# =========================================================
+# 8. UI: Invite System Views
+# =========================================================
 class InviteExchangeSelect(discord.ui.Select):
     def __init__(self):
         options = []
@@ -358,6 +387,9 @@ class InviteExchangeView(discord.ui.View):
         embed = discord.Embed(title="📊 Your Invites", description=f"You currently have **{invites}** valid invites.", color=discord.Color.blue())
         await interaction.response.send_message(embed=embed, ephemeral=True)
 
+# =========================================================
+# 9. UI: Ticket System Views
+# =========================================================
 class TicketPanelView(discord.ui.View):
     def __init__(self):
         super().__init__(timeout=None)
@@ -379,6 +411,9 @@ class TicketControlView(discord.ui.View):
         await asyncio.sleep(3)
         await interaction.channel.delete()
 
+# =========================================================
+# 10. UI: Main Panel View & Verify
+# =========================================================
 class LinkButtonView(discord.ui.View):
     def __init__(self, url: str, label: str):
         super().__init__(timeout=None)
@@ -466,7 +501,7 @@ class PanelView(discord.ui.View):
         await interaction.response.send_message(embed=embed, ephemeral=True)
 
 # =========================================================
-# 6. Events
+# 11. Events (Guess Game & Invites)
 # =========================================================
 @bot.event
 async def on_message(message):
@@ -541,13 +576,10 @@ async def on_member_join(member):
 
 @bot.event
 async def on_ready():
-    # 安全なビューの登録
     views = [PanelView(), SpinView(), TicketPanelView(), TicketControlView(), VerifyView(), ShopView(), InviteExchangeView()]
     for view in views:
-        try:
-            bot.add_view(view)
-        except Exception as e:
-            print(f"Error adding view: {e}")
+        try: bot.add_view(view)
+        except: pass
             
     for guild in bot.guilds:
         try:
@@ -564,7 +596,7 @@ async def on_ready():
     print(f"Logged in as {bot.user}")
 
 # =========================================================
-# 7. Slash Commands
+# 12. Slash Commands
 # =========================================================
 @bot.tree.error
 async def on_app_command_error(interaction: discord.Interaction, error: app_commands.AppCommandError):
@@ -658,10 +690,67 @@ async def invite_admin_cmd(interaction: discord.Interaction, user: discord.User,
 @app_commands.checks.has_permissions(administrator=True)
 async def shop_setup_cmd(interaction: discord.Interaction):
     embed = discord.Embed(title="🛒 Coin Shop", description="Click the button below to open the shop.", color=discord.Color.gold())
-    for key, item in coin_shop_items.items():
-        embed.add_field(name=item["name"], value=f"`{item['price']}` Coins", inline=True)
+    
+    if not coin_shop_items:
+        embed.description = "The shop is currently empty. Check back later!"
+    else:
+        for key, item in coin_shop_items.items():
+            embed.add_field(name=item["name"], value=f"`{item['price']}` Coins", inline=True)
+            if "image_url" in item and item["image_url"]:
+                embed.set_image(url=item["image_url"])
+                
     await interaction.response.send_message("✅ Shop created!", ephemeral=True)
     await interaction.channel.send(embed=embed, view=ShopView())
+
+@bot.tree.command(name="shop_add", description="[ADMIN] Add an item to the shop")
+@app_commands.describe(
+    item_id="Unique ID (e.g. 'vip_role', '100_coins')",
+    name="Display name",
+    price="Price in coins",
+    item_type="Type of item",
+    hours="Duration in hours (if key, 0 for lifetime)",
+    role_id="Role ID (if type is role)",
+    image_url="URL of the item image (optional)"
+)
+@app_commands.choices(item_type=[
+    app_commands.Choice(name="Key", value="key"),
+    app_commands.Choice(name="Spin Ticket", value="spin"),
+    app_commands.Choice(name="Role", value="role"),
+    app_commands.Choice(name="Custom / Other", value="custom")
+])
+@app_commands.checks.has_permissions(administrator=True)
+async def shop_add_cmd(
+    interaction: discord.Interaction, 
+    item_id: str, 
+    name: str, 
+    price: int, 
+    item_type: app_commands.Choice[str], 
+    hours: int = 0,
+    role_id: str = None,
+    image_url: str = None
+):
+    role_id_int = int(role_id) if role_id and role_id.isdigit() else None
+    
+    coin_shop_items[item_id] = {
+        "name": name,
+        "price": price,
+        "type": item_type.value,
+        "hours": hours,
+        "role_id": role_id_int,
+        "image_url": image_url
+    }
+    
+    await interaction.response.send_message(f"✅ Added **{name}** to the shop for `{price}` coins.\n*(Run `/shop_setup` to update the panel)*", ephemeral=True)
+
+@bot.tree.command(name="shop_remove", description="[ADMIN] Remove an item from the shop")
+@app_commands.describe(item_id="The ID of the item to remove")
+@app_commands.checks.has_permissions(administrator=True)
+async def shop_remove_cmd(interaction: discord.Interaction, item_id: str):
+    if item_id in coin_shop_items:
+        del coin_shop_items[item_id]
+        await interaction.response.send_message(f"✅ Removed `{item_id}` from the shop.", ephemeral=True)
+    else:
+        await interaction.response.send_message(f"❌ Item ID `{item_id}` not found.", ephemeral=True)
 
 @bot.tree.command(name="invite_setup", description="[ADMIN] Post invite panel")
 @app_commands.checks.has_permissions(administrator=True)
@@ -671,18 +760,6 @@ async def invite_setup_cmd(interaction: discord.Interaction):
         embed.add_field(name=item["name"], value=f"Requires `{item['invites']}` Invites", inline=True)
     await interaction.response.send_message("✅ Invite panel created!", ephemeral=True)
     await interaction.channel.send(embed=embed, view=InviteExchangeView())
-
-@bot.tree.command(name="coin_config", description="[ADMIN] Configure shop items")
-@app_commands.describe(item_id="ID", name="Name", price="Price", item_type="Type", hours="Duration (if key)")
-@app_commands.choices(item_type=[
-    app_commands.Choice(name="Key", value="key"),
-    app_commands.Choice(name="Spin Ticket", value="spin"),
-    app_commands.Choice(name="Custom", value="custom")
-])
-@app_commands.checks.has_permissions(administrator=True)
-async def coin_config_cmd(interaction: discord.Interaction, item_id: str, name: str, price: int, item_type: app_commands.Choice[str], hours: int = 0):
-    coin_shop_items[item_id] = {"name": name, "price": price, "type": item_type.value, "hours": hours}
-    await interaction.response.send_message(f"✅ Configured `{item_id}`.", ephemeral=True)
 
 @bot.tree.command(name="invite_config", description="[ADMIN] Configure invite rewards")
 @app_commands.describe(invite_count="Required invites", name="Prize name", hours="Key duration hours (0 for lifetime)")
@@ -883,7 +960,7 @@ async def panel(interaction: discord.Interaction):
     await interaction.response.send_message(embed=embed, view=PanelView())
 
 # =========================================================
-# 8. Start
+# 13. Start
 # =========================================================
 if __name__ == "__main__":
     threading.Thread(target=run_dummy_server, daemon=True).start()
