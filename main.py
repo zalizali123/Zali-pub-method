@@ -702,15 +702,15 @@ async def shop_setup_cmd(interaction: discord.Interaction):
     await interaction.response.send_message("✅ Shop created!", ephemeral=True)
     await interaction.channel.send(embed=embed, view=ShopView())
 
-@bot.tree.command(name="shop_add", description="[ADMIN] Add an item to the shop")
+@bot.tree.command(name="shop_add", description="[ADMIN] Add an item to the shop with an image")
 @app_commands.describe(
     item_id="Unique ID (e.g. 'vip_role', '100_coins')",
     name="Display name",
     price="Price in coins",
     item_type="Type of item",
+    image="Upload an image for the item",
     hours="Duration in hours (if key, 0 for lifetime)",
-    role_id="Role ID (if type is role)",
-    image_url="URL of the item image (optional)"
+    role_id="Role ID (if type is role)"
 )
 @app_commands.choices(item_type=[
     app_commands.Choice(name="Key", value="key"),
@@ -725,11 +725,12 @@ async def shop_add_cmd(
     name: str, 
     price: int, 
     item_type: app_commands.Choice[str], 
+    image: discord.Attachment = None,
     hours: int = 0,
-    role_id: str = None,
-    image_url: str = None
+    role_id: str = None
 ):
     role_id_int = int(role_id) if role_id and role_id.isdigit() else None
+    image_url = image.url if image else None
     
     coin_shop_items[item_id] = {
         "name": name,
